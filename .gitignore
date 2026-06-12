@@ -1,0 +1,7 @@
+.DS_Store
+.zig-cache
+zig-out/
+dist/
+hostlift-inventory.json
+node_modules/
+.env

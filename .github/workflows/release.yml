@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        target:
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Build binary
+        run: |
+          zig build \
+            -Dtarget=${{ matrix.target }} \
+            -Doptimize=ReleaseSafe \
+            --prefix dist/${{ matrix.target }}
+
+      - name: Generate checksum
+        run: |
+          cd dist/${{ matrix.target }}/bin
+          sha256sum hostlift > hostlift.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostlift-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/bin/
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for dir in artifacts/hostlift-*; do
+            target=$(basename "$dir" | sed 's/hostlift-//')
+            cp "$dir/bin/hostlift" "release/hostlift-${target}"
+            cp "$dir/bin/hostlift.sha256" "release/hostlift-${target}.sha256"
+          done
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          # 提取 ## [tag] 到下一个 ## [ 之间的内容
+          awk -v tag="$tag" '
+            /^## \[/ {
+              if (found) exit
+              gsub(/^## \[|\]/, "")
+              if ($0 == tag || $0 ~ "^"tag) found=1
+              next
+            }
+            found { print }
+          ' docs/CHANGELOG.md > release-notes.md || true
+          # 如果没匹配到，用 tag 名作为标题
+          if [ ! -s release-notes.md ]; then
+            echo "## ${tag}" > release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          generate_release_notes: true
+          files: release/*

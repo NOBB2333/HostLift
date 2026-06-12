@@ -1,0 +1,16 @@
+.{
+    .name = .hostlift,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xc80fa01b18747308,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "PRD_zh.md",
+        "ARCHITECTURE_zh.md",
+        "mise.toml",
+    },
+}
