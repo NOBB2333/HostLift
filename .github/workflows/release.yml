@@ -67,8 +67,8 @@ jobs:
           mkdir -p release
           for dir in artifacts/hostlift-*; do
             target=$(basename "$dir" | sed 's/hostlift-//')
-            cp "$dir/bin/hostlift" "release/hostlift-${target}"
-            cp "$dir/bin/hostlift.sha256" "release/hostlift-${target}.sha256"
+            cp "$dir/hostlift" "release/hostlift-${target}"
+            cp "$dir/hostlift.sha256" "release/hostlift-${target}.sha256"
           done
 
       - name: Extract changelog for this version
