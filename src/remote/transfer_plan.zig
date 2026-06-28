@@ -108,6 +108,7 @@ pub fn buildTransferPlanAdvancedWithLimits(
         .timeout_seconds = normalized_options.timeout_seconds,
         .retries = normalized_options.retries,
         .ssh_identity_file = normalized_options.ssh_identity_file,
+        .remote_source_note = remoteSourceNote(source_host, transport),
         .credential_source = normalized_options.credential_source,
         .operation_id = normalized_options.operation_id,
         .cancel_file = normalized_options.cancel_file,
@@ -115,6 +116,11 @@ pub fn buildTransferPlanAdvancedWithLimits(
         .risk = if (recursive) .high else .medium,
         .requires_approval = true,
     };
+}
+
+fn remoteSourceNote(source_host: ?[]const u8, transport: schema.TransferTransport) ?[]const u8 {
+    if (source_host == null or transport != .rsync) return null;
+    return "source-host + rsync runs rsync on the source host; --identity-file is only used by the control machine to connect to source-host, and the source host must BatchMode SSH to the target host with its own SSH config or agent";
 }
 
 test "transfer plan rejects unsafe target paths" {
@@ -213,6 +219,27 @@ test "transfer plan supports rsync resume transport" {
     try std.testing.expectEqual(schema.TransferTransport.rsync, transfer_plan.transport);
     try std.testing.expect(transfer_plan.partial);
     try std.testing.expect(transfer_plan.resumable);
+}
+
+test "transfer plan supports remote source rsync transport" {
+    const transfer_plan = try buildTransferPlanAdvancedWithLimits(
+        "root@192.0.2.10",
+        "root@192.0.2.11",
+        "/srv/app",
+        "/srv/app",
+        true,
+        true,
+        .rsync,
+        true,
+        false,
+        .{},
+        null,
+    );
+    try std.testing.expectEqualStrings("root@192.0.2.11", transfer_plan.source_host.?);
+    try std.testing.expectEqual(schema.TransferTransport.rsync, transfer_plan.transport);
+    try std.testing.expect(transfer_plan.partial);
+    try std.testing.expect(!transfer_plan.verify_checksum);
+    try std.testing.expect(transfer_plan.remote_source_note != null);
 }
 
 test "transfer plan carries bandwidth limit" {

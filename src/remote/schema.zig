@@ -45,6 +45,7 @@ pub const TransferPlan = struct {
     timeout_seconds: u32 = 60,
     retries: u8 = 0,
     ssh_identity_file: ?[]const u8 = null,
+    remote_source_note: ?[]const u8 = null,
     credential_source: credentials.SourceKind = .default_ssh,
     operation_id: ?[]const u8 = null,
     cancel_file: ?[]const u8 = null,

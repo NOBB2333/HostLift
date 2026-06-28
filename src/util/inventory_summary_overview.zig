@@ -5,6 +5,7 @@ const counts = @import("inventory_summary_counts.zig");
 pub fn writeOverview(writer: anytype, value: inventory.Inventory) !void {
     const modules = value.modules;
     const service_counts = counts.countServices(modules.services.units);
+    const resource_counts = counts.countResources(modules.resources.resources);
 
     try writer.print(
         \\HostLift inventory summary
@@ -146,6 +147,8 @@ pub fn writeOverview(writer: anytype, value: inventory.Inventory) !void {
         \\  Compose files: {d}
         \\  fstab entries: {d}
         \\  Physical/remote mounts: {d}{s}
+        \\  Resource map entries: {d}{s}
+        \\  Resource actions: copy={d} review={d} exclude={d} sensitive={d}
         \\
     , .{
         counts.countPresentDataPaths(modules.appdata.paths),
@@ -165,6 +168,12 @@ pub fn writeOverview(writer: anytype, value: inventory.Inventory) !void {
         modules.storage.fstab_entries.len,
         counts.countPhysicalOrRemoteMounts(modules.storage.mounts),
         if (modules.storage.truncated) " (truncated)" else "",
+        modules.resources.resources.len,
+        if (modules.resources.truncated) " (truncated)" else "",
+        resource_counts.copy,
+        resource_counts.review,
+        resource_counts.exclude,
+        resource_counts.sensitive,
     });
 
     try writer.print(

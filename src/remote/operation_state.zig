@@ -38,6 +38,8 @@ pub fn appendEvent(io: std.Io, path: ?[]const u8, event: Event) !void {
     try validatePath(output_path);
     var file = try std.Io.Dir.createFileAbsolute(io, output_path, .{ .truncate = false });
     defer file.close(io);
+    try file.lock(io, .exclusive);
+    defer file.unlock(io);
 
     var buffer: [1024]u8 = undefined;
     var writer = file.writer(io, &buffer);

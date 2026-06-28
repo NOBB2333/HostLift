@@ -165,21 +165,22 @@ HostLift 在明确的阶段中运行：
 | 模块 | 默认状态 | v1 处理方式 |
 |---|---:|---|
 | 包 (Packages) | 开启 | 使用相同包管理器重新安装包意图 |
-| 服务 (Services) | 开启 | 迁移自定义 systemd 单元和启用状态 |
-| 定时任务 (Cron) | 开启 | 迁移用户和系统定时任务条目 |
+| 服务 (Services) | 开启 | 迁移自定义 systemd 单元和启用状态；扫描 drop-in、service env 文件和运行态，必要时生成 start/status 审查动作 |
+| 定时任务 (Cron) | 开启 | 迁移用户和系统定时任务条目；anacron 和 at jobs 默认只审查不 replay |
 | 用户 (Users) | 开启 | 添加非系统用户/组并进行冲突检查 |
 | SSH | 开启 | 迁移 `authorized_keys`；私钥默认关闭 |
 | 配置 (Configs) | 开启 | 迁移选定的 `/etc` 配置路径 |
 | 主目录配置 (Home Configs) | 开启 | 迁移 root 和非系统用户的精选 dotfile/XDG 配置路径 |
 | 应用数据 (App Data) | 关闭 | 复制选定的数据路径并有大小限制 |
+| 整机资源 (Resources) | 审查模式 | 生成资源地图，展示路径大小、磁盘占用、文件数、包归属、文件类型、静态动态依赖摘要、证据、敏感等级和默认动作；通用识别未被包管理器托管的脚本/手工安装 executable/install root，主动扫描用户级 bin，并生成 reinstall 和容量风险人工步骤 |
 | Web 根目录 (Web Roots) | 关闭 | 复制选定的 `/var/www` 路径 |
-| Docker | 审查模式 | 迁移守护进程配置、Compose 文件、镜像列表和可选 volume 数据，不迁移运行中的容器 |
-| 系统基线 (System Baseline) | 审查模式 | 扫描 locale/timezone、PAM、NTP、sysctl、LDAP/SSSD、DNS/NSS、静态网络、hosts、脚本安装应用和敏感材料存在性，默认只生成人工审查项 |
+| Docker | 审查模式 | 迁移守护进程配置、Compose 文件、镜像列表和可选 volume 数据；network/container 缺失生成重建和健康检查提示，不自动恢复运行态 |
+| 系统基线 (System Baseline) | 审查模式 | 扫描 locale/timezone、PAM、NTP、sysctl、LDAP/SSSD、DNS/NSS、网络地址/路由、TLS/证书、系统环境变量、语言运行时、hosts、脚本安装应用和敏感材料存在性，默认只生成人工审查项 |
 | 防火墙 (Firewall) | 审查模式 | 在后端匹配时导出/导入配置文件 |
-| 网络 (Network) | 审查模式 | 仅迁移安全条目，默认不迁移 IP 路由 |
+| 网络 (Network) | 审查模式 | 采集 netplan、NetworkManager、systemd-networkd、地址、路由和监听端口摘要，默认 manual_step，避免自动改 IP 路由 |
 | 安全 (Security) | 审查模式 | 证书可以迁移；PAM/SELinux/AppArmor 需要审查 |
 | 内核 (Kernel) | 关闭 | 报告 sysctl/模块差异；仅应用选定的安全 sysctl |
-| 存储 (Storage) | 关闭 | 仅报告 fstab/存储；v1 中不进行自动设备映射 |
+| 存储 (Storage) | 关闭 | 报告 fstab、mount、NFS/CIFS、autofs、LVM/ZFS/Btrfs 操作清单；v1 中不进行自动设备映射 |
 
 ### 4.2 包
 
@@ -201,12 +202,13 @@ HostLift 必须：
 
 - 检测初始化系统。v1 支持 systemd 作为主要路径。
 - 迁移 `/etc/systemd/system/` 下的自定义单元。
-- 迁移覆盖配置。
+- 扫描并审查 systemd drop-in、`/etc/default/*`、`/etc/sysconfig/*` 和 `EnvironmentFile=` 引用。
 - 捕获启用/禁用状态。
+- 捕获 active/reloading/activating/inactive/failed 等运行态。
 - 在可用时运行 `systemd-analyze verify`。
 - 应用单元后运行 `systemctl daemon-reload`。
 - 仅在验证后启用服务。
-- 除非用户明确启用 `auto_start`，否则不自动启动迁移的服务。
+- 源端运行中而目标端未运行时生成 `services/review-start/<unit>` 和 `services/check-status/<unit>` 高风险人工步骤，不生成默认可执行启动 action。
 
 ### 4.4 定时任务和定时器
 
@@ -215,6 +217,7 @@ HostLift 必须：
 - 为选定用户迁移用户 crontab。
 - 迁移 `/etc/crontab` 和 `/etc/cron.d/` 条目并进行冲突审查。
 - 将 systemd 定时器作为服务模块的一部分迁移。
+- 识别 `/etc/anacrontab`、periodic 目录和 at spool 来源。
 - 报告 `at` 作业，但不自动应用过期或模糊的作业。
 
 ### 4.5 用户和组
@@ -269,7 +272,7 @@ HostLift 必须：
 - 强制执行单个项目和总大小限制。
 - 保留所有权和权限。
 - 支持大文件的可恢复传输。
-- 当路径似乎包含数据库数据目录时发出警告，如 `/var/lib/mysql`、`/var/lib/postgresql`、`/var/lib/redis` 或 Docker 卷。
+- 当路径似乎包含有状态数据目录时发出警告，如 `/var/lib/mysql`、`/var/lib/postgresql`、`/var/lib/redis`、`/var/lib/mongodb`、`/var/lib/elasticsearch`、`/var/lib/rabbitmq`、`/var/lib/kafka` 或 Docker 卷。
 
 数据库目录在 v1 中不会自动迁移。用户应使用本机转储/恢复或自定义钩子。
 
@@ -340,54 +343,84 @@ HostLift 必须：
 
 ## 5. CLI 需求
 
-### 5.1 源服务器
+### 5.1 当前个人迁移主流程
+
+当前已实现的 CLI 主线是 `scan -> plan -> validate -> apply`，源主机和目标主机分别生成 inventory，控制机再比较两份清单并分批执行。不存在 `hostlift export`、`hostlift import`、`--modules` 或 `--bundle` 这类当前命令。
 
 ```bash
-# 以导出模式启动源并等待目标
-hostlift export
-
-# 仅导出选定的模块
-hostlift export --modules packages,services,cron,users,ssh,configs
-
-# 创建离线迁移包
-hostlift export --output /root/hostlift-bundle.tar.zst
-```
-
-### 5.2 目标服务器
-
-```bash
-# 连接到源，扫描两台主机，并生成计划
-hostlift import --source 203.0.113.10
-
-# 非交互式干运行
-hostlift import --source 203.0.113.10 \
-  --modules packages,services,configs \
-  --dry-run --format json
-
-# 应用先前审查过的计划
-hostlift apply --plan /root/hostlift-plan.json
-
-# 从离线包导入
-hostlift import --from /root/hostlift-bundle.tar.zst
-```
-
-### 5.3 本地扫描和计划
-
-```bash
-# 扫描本地主机
+# 在源主机扫描
 hostlift scan --output source-inventory.json
 
-# 比较清单并生成计划
+# 在目标主机扫描
+hostlift scan --output target-inventory.json
+
+# 在控制机比较清单并生成计划
 hostlift plan \
   --source source-inventory.json \
   --target target-inventory.json \
-  --output hostlift-plan.json
+  --output hostlift-plan.json \
+  --summary \
+  --force
+
+# 输出按个人迁移批次分组的选择清单
+hostlift plan \
+  --source source-inventory.json \
+  --target target-inventory.json \
+  --selection
+
+# 输出迁移后健康检查清单
+hostlift plan \
+  --source source-inventory.json \
+  --target target-inventory.json \
+  --health-report
 
 # 验证现有计划而不应用
-hostlift validate --plan hostlift-plan.json
+hostlift validate --plan hostlift-plan.json --summary
+hostlift apply --plan hostlift-plan.json --dry-run
+
+# 按模块分批执行
+hostlift apply \
+  --plan hostlift-plan.json \
+  --source-host root@OLD \
+  --host root@NEW \
+  --include-module packages,users \
+  --audit-log ./batch1-audit.jsonl \
+  --approve
 ```
 
-## 6. 配置
+### 5.2 定点传输和远程源传输
+
+完整 plan 之外，当前也支持直接传输已知路径。个人服务器迁移优先使用 `rsync`、`--resume` 和 `source-host + rsync`，而不是常驻 agent。
+
+```bash
+# 控制机到目标机
+hostlift transfer \
+  --host root@NEW \
+  --source /srv/app \
+  --target /srv/app \
+  --recursive \
+  --transport rsync \
+  --resume \
+  --approve
+
+# 源机推目标机；源机必须能 BatchMode SSH 到目标机
+hostlift transfer \
+  --source-host root@OLD \
+  --host root@NEW \
+  --source /srv/app \
+  --target /srv/app \
+  --recursive \
+  --transport rsync \
+  --approve
+```
+
+### 5.3 后续 CLI 设想
+
+离线 bundle、交互式 TUI 和 `export/import` 风格向导仍可作为后续需求，但必须基于当前 inventory、plan、audit 和 rollback 契约实现；在未落地前，文档和示例不得把它们写成可用命令。
+
+## 6. 配置文件需求（后续）
+
+当前 CLI 主要通过命令行参数、inventory JSON、plan JSON、policy JSON、host-authz JSON 和 approval receipt JSON 配置执行；尚未读取全局 `config.toml`。以下是后续配置文件草案，不是当前可用功能。
 
 默认配置路径：
 
@@ -462,9 +495,9 @@ path = "/var/lib/hostlift/rollback"
 max_snapshots = 5
 ```
 
-## 7. TUI 需求
+## 7. 选择界面需求
 
-HostLift 应为交互式迁移提供终端 UI：
+HostLift 当前已提供 `hostlift plan --selection` 文本 action 清单，用于个人迁移时按 action 前缀勾选和分批执行。完整 TUI 仍是后续增强，目标是把文本清单升级为更直观的终端向导：
 
 ```
 - 连接屏幕
@@ -475,7 +508,7 @@ HostLift 应为交互式迁移提供终端 UI：
 - 验证和报告屏幕
 ```
 
-计划审查屏幕必须清晰显示：
+选择界面和计划审查屏幕必须清晰显示：
 
 ```
 - 要创建的项目
@@ -930,8 +963,9 @@ v1 迁移成功的条件：
   - export 模式
   - import 模式
   - 加密的源到目标传输
-  - 可恢复的文件传输
-  - 交互式 TUI
+  - source-host + rsync 远程源传输
+  - rsync 可恢复传输和文本 action 选择清单
+  - 交互式 TUI 作为后续增强
 ```
 
 ### v0.4.0 - 数据和风险模块
@@ -941,7 +975,7 @@ v1 迁移成功的条件：
   - 应用数据复制
   - Docker Compose 发现
   - 防火墙审查和应用
-  - 网络报告和选定安全配置迁移
+  - 网络/存储/证书/系统环境变量 scan-only 审查和操作清单
 ```
 
 ### v1.0.0 - 稳定的相同版本迁移

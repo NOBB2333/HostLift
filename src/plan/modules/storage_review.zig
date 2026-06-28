@@ -20,7 +20,7 @@ pub fn appendActions(
             .subject = entry.mount_point,
             .module = .storage,
             .risk = .critical,
-            .description = "Review fstab entry, device mapping and application data consistency before manual migration",
+            .description = descriptionForFstab(entry),
         });
     }
     for (source.mounts) |entry| {
@@ -32,7 +32,7 @@ pub fn appendActions(
             .subject = entry.mount_point,
             .module = .storage,
             .risk = .high,
-            .description = "Review source mount point before migration; HostLift does not mount filesystems automatically",
+            .description = descriptionForMount(entry),
         });
     }
     if (source.truncated) {
@@ -45,6 +45,20 @@ pub fn appendActions(
             .description = "Review truncated mount scan results before migration",
         });
     }
+}
+
+// 根据 fstab 类型生成操作清单提示。
+fn descriptionForFstab(entry: inventory.FstabEntry) []const u8 {
+    if (isRemoteFs(entry.fs_type)) return "Review remote mount checklist: network reachability, credentials, mount options and target boot behavior before manual migration";
+    if (isManagedStorageFs(entry.fs_type) or looksLikeManagedDevice(entry.device)) return "Review storage mapping checklist: target disks, UUIDs, LVM/ZFS/Btrfs layout and backup consistency before editing fstab";
+    return "Review fstab entry, device mapping and application data consistency before manual migration";
+}
+
+// 根据当前挂载类型生成操作清单提示。
+fn descriptionForMount(entry: inventory.MountEntry) []const u8 {
+    if (isRemoteFs(entry.fs_type)) return "Review remote mounted data before migration; confirm NFS/CIFS/autofs credentials and target network path manually";
+    if (isManagedStorageFs(entry.fs_type) or looksLikeManagedDevice(entry.source)) return "Review mounted storage before migration; HostLift does not recreate LVM/ZFS/Btrfs/disk topology automatically";
+    return "Review source mount point before migration; HostLift does not mount filesystems automatically";
 }
 
 // 查找 fstab mount point。
@@ -99,4 +113,26 @@ fn isVirtualFs(fs_type: []const u8) bool {
         if (std.mem.eql(u8, fs_type, candidate)) return true;
     }
     return false;
+}
+
+// 判断文件系统是否常见于远程挂载。
+fn isRemoteFs(fs_type: []const u8) bool {
+    return std.mem.eql(u8, fs_type, "nfs") or
+        std.mem.eql(u8, fs_type, "nfs4") or
+        std.mem.eql(u8, fs_type, "cifs") or
+        std.mem.eql(u8, fs_type, "smb3") or
+        std.mem.eql(u8, fs_type, "fuse.sshfs");
+}
+
+// 判断文件系统类型是否常见于需要专门准备的存储能力。
+fn isManagedStorageFs(fs_type: []const u8) bool {
+    return std.mem.eql(u8, fs_type, "zfs") or
+        std.mem.eql(u8, fs_type, "btrfs");
+}
+
+// 判断设备字符串是否看起来来自 LVM/ZFS/Btrfs 或远程源。
+fn looksLikeManagedDevice(device: []const u8) bool {
+    return std.mem.startsWith(u8, device, "/dev/mapper/") or
+        std.mem.startsWith(u8, device, "/dev/zvol/") or
+        std.mem.indexOf(u8, device, ":/") != null;
 }

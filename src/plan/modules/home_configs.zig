@@ -22,7 +22,7 @@ pub fn appendActions(
             .owner = config.user,
             .risk = if (config.kind == .ssh) .high else .medium,
             .requires_confirmation = true,
-            .description = "Copy selected home configuration path",
+            .description = "Copy selected home configuration path and verify owner/group/mode after migration",
             .recursive = config.directory,
         });
     }

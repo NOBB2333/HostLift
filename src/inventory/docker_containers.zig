@@ -34,12 +34,15 @@ pub fn scanRuntime(io: std.Io, allocator: std.mem.Allocator, provider: common.Ru
             break;
         }
         const parsed = parseDockerContainerLine(line) orelse continue;
+        const mounts = collectContainerMounts(io, allocator, provider, parsed.name) catch null;
+        errdefer if (mounts) |value| allocator.free(value);
         try containers.append(allocator, .{
             .runtime = provider.kind,
             .name = try allocator.dupe(u8, parsed.name),
             .image = try allocator.dupe(u8, parsed.image),
             .status = try allocator.dupe(u8, parsed.status),
             .ports = try allocator.dupe(u8, parsed.ports),
+            .mounts = mounts,
             .compose_project = if (parsed.compose_project) |value| try allocator.dupe(u8, value) else null,
             .compose_service = if (parsed.compose_service) |value| try allocator.dupe(u8, value) else null,
             .compose_workdir = if (parsed.compose_workdir) |value| try allocator.dupe(u8, value) else null,
@@ -56,10 +59,22 @@ pub fn free(allocator: std.mem.Allocator, containers: []schema.DockerContainer) 
         allocator.free(container.image);
         allocator.free(container.status);
         allocator.free(container.ports);
+        if (container.mounts) |mounts| allocator.free(mounts);
         if (container.compose_project) |value| allocator.free(value);
         if (container.compose_service) |value| allocator.free(value);
         if (container.compose_workdir) |value| allocator.free(value);
     }
+}
+
+fn collectContainerMounts(io: std.Io, allocator: std.mem.Allocator, provider: common.RuntimeProvider, name: []const u8) !?[]const u8 {
+    const output = probe.runFirstLine(
+        io,
+        allocator,
+        &.{ provider.command, "inspect", "--format", "{{range .Mounts}}{{if .Name}}{{.Name}}{{else}}{{.Source}}{{end}}={{.Destination}};{{end}}", name },
+    ) catch return null;
+    defer allocator.free(output);
+    if (output.len == 0 or std.mem.eql(u8, output, "<no value>")) return null;
+    return @as(?[]const u8, try allocator.dupe(u8, output[0..@min(output.len, 1024)]));
 }
 
 // docker ps 输出解析后的容器字段。

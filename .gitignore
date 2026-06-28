@@ -5,3 +5,6 @@ dist/
 hostlift-inventory.json
 node_modules/
 .env
+
+
+photorec.*

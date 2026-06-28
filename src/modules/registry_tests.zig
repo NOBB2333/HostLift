@@ -13,6 +13,8 @@ test "registry exposes all currently planned modules" {
         .home_configs,
         .appdata,
         .projects,
+        .resources,
+        .network,
         .firewall,
         .docker,
         .sudoers,
@@ -31,7 +33,6 @@ test "registry exposes all currently planned modules" {
 }
 
 test "plan registry keeps low-level observation-only modules out of planning" {
-    try std.testing.expect(registry.find(.network) == null);
     try std.testing.expect(registry.find(.dev_env) == null);
     try std.testing.expect(registry.find(.security) == null);
     try std.testing.expect(registry.find(.processes) == null);
@@ -39,7 +40,7 @@ test "plan registry keeps low-level observation-only modules out of planning" {
 }
 
 test "high-risk scan-only modules expose plan review but no apply" {
-    const review_modules = [_]plan.ModuleName{ .sudoers, .acl, .security_policy, .storage, .system_baseline };
+    const review_modules = [_]plan.ModuleName{ .network, .sudoers, .acl, .security_policy, .storage, .system_baseline };
     for (review_modules) |module_name| {
         const module_handler = registry.find(module_name) orelse return error.MissingHandler;
         try std.testing.expect(module_handler.planActions != null);
@@ -55,6 +56,7 @@ test "registry exposes scanner handlers including observation-only modules" {
     var found_dev_env = false;
     var found_security_policy = false;
     var found_processes = false;
+    var found_resources = false;
     var found_sudoers = false;
     var found_storage = false;
     var found_acl = false;
@@ -68,6 +70,7 @@ test "registry exposes scanner handlers including observation-only modules" {
             .dev_env => found_dev_env = true,
             .security_policy => found_security_policy = true,
             .processes => found_processes = true,
+            .resources => found_resources = true,
             .sudoers => found_sudoers = true,
             .storage => found_storage = true,
             .acl => found_acl = true,
@@ -81,6 +84,7 @@ test "registry exposes scanner handlers including observation-only modules" {
     try std.testing.expect(found_dev_env);
     try std.testing.expect(found_security_policy);
     try std.testing.expect(found_processes);
+    try std.testing.expect(found_resources);
     try std.testing.expect(found_sudoers);
     try std.testing.expect(found_storage);
     try std.testing.expect(found_acl);
@@ -137,6 +141,7 @@ test "registry exposes handler apply for all currently executable modules" {
     try std.testing.expect((registry.find(.ssh) orelse return error.MissingHandler).apply != null);
     try std.testing.expect((registry.find(.home_configs) orelse return error.MissingHandler).apply != null);
     try std.testing.expect((registry.find(.appdata) orelse return error.MissingHandler).apply != null);
+    try std.testing.expect((registry.find(.resources) orelse return error.MissingHandler).apply != null);
     try std.testing.expect((registry.find(.firewall) orelse return error.MissingHandler).apply != null);
 }
 
@@ -267,6 +272,7 @@ test "registry exposes verify where checks are currently implemented" {
     try std.testing.expect((registry.find(.ssh) orelse return error.MissingHandler).verify != null);
     try std.testing.expect((registry.find(.home_configs) orelse return error.MissingHandler).verify != null);
     try std.testing.expect((registry.find(.appdata) orelse return error.MissingHandler).verify != null);
+    try std.testing.expect((registry.find(.resources) orelse return error.MissingHandler).verify != null);
     try std.testing.expect((registry.find(.firewall) orelse return error.MissingHandler).verify != null);
 }
 
@@ -276,5 +282,6 @@ test "registry exposes rollback for file and compose-capable modules" {
     try std.testing.expect((registry.find(.users) orelse return error.MissingHandler).rollback != null);
     try std.testing.expect((registry.find(.projects) orelse return error.MissingHandler).rollback != null);
     try std.testing.expect((registry.find(.configs) orelse return error.MissingHandler).rollback != null);
+    try std.testing.expect((registry.find(.resources) orelse return error.MissingHandler).rollback != null);
     try std.testing.expect((registry.find(.firewall) orelse return error.MissingHandler).rollback != null);
 }

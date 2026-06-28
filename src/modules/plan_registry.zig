@@ -11,9 +11,11 @@ const cron_rules = @import("../plan/modules/cron.zig");
 const firewall_rules = @import("../plan/modules/firewall.zig");
 const home_configs_rules = @import("../plan/modules/home_configs.zig");
 const acl_review_rules = @import("../plan/modules/acl_review.zig");
+const network_review_rules = @import("../plan/modules/network_review.zig");
 const packages_rules = @import("../plan/modules/packages.zig");
 const project_handler = @import("handlers/projects.zig");
 const projects_rules = @import("../plan/modules/projects.zig");
+const resources_rules = @import("../plan/modules/resources.zig");
 const rollback_handler = @import("handlers/rollback.zig");
 const security_policy_review_rules = @import("../plan/modules/security_policy_review.zig");
 const service_handler = @import("handlers/services.zig");
@@ -40,6 +42,8 @@ const registered_handlers = [_]ModuleHandler{
     .{ .name = .projects, .planActions = planProjects, .applyRequirements = project_handler.applyRequirements, .apply = project_handler.apply, .verify = project_handler.verify, .rollback = project_handler.rollback },
     .{ .name = .firewall, .planActions = planFirewall, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
     .{ .name = .docker, .planActions = planContainerManualReview, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .resources, .planActions = planResources, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .network, .planActions = planNetworkManualReview },
     .{ .name = .sudoers, .planActions = planSudoersManualReview },
     .{ .name = .acl, .planActions = planAclManualReview },
     .{ .name = .security_policy, .planActions = planSecurityPolicyManualReview },
@@ -123,6 +127,17 @@ fn planAppData(ctx: PlanContext, actions: *std.ArrayList(plan.Action)) !void {
 // 规划项目模块的迁移 action。
 fn planProjects(ctx: PlanContext, actions: *std.ArrayList(plan.Action)) !void {
     try projects_rules.appendActions(ctx.allocator, actions, ctx.source.projects, ctx.target.projects);
+}
+
+// 规划整机资源模块的迁移 action。
+fn planResources(ctx: PlanContext, actions: *std.ArrayList(plan.Action)) !void {
+    try resources_rules.appendActions(ctx.allocator, actions, ctx.source.resources, ctx.target.resources);
+    try resources_rules.appendCapacityReviewActions(ctx.allocator, actions, ctx.source.resources, ctx.target.resources, ctx.source.storage, ctx.target.storage);
+}
+
+// 生成网络监听和健康检查人工审查 action。
+fn planNetworkManualReview(ctx: PlanContext, actions: *std.ArrayList(plan.Action)) !void {
+    try network_review_rules.appendActions(ctx.allocator, actions, ctx.source.network, ctx.target.network);
 }
 
 // 规划防火墙模块的迁移 action。

@@ -181,6 +181,51 @@ test "rollback manifest accepts compose start rollback subject path" {
     try std.testing.expectError(error.InvalidRollbackManifestEntry, schema.validateEntry(relative_subject));
 }
 
+test "rollback manifest accepts delete-created-path rollback entry" {
+    const entry = schema.Entry{
+        .created_at = 123,
+        .host = "root@192.0.2.10",
+        .action_id = "resources/copy//srv/app",
+        .action_type = "delete_created_path",
+        .original_path = "/srv/app",
+        .backup_path = "",
+        .subject = "stat:v1:4096:12:1710000000",
+    };
+    try schema.validateEntry(entry);
+
+    const unsafe = schema.Entry{
+        .created_at = 123,
+        .host = "root@192.0.2.10",
+        .action_id = "resources/copy//srv/app",
+        .action_type = "delete_created_path",
+        .original_path = "/srv/app*",
+        .backup_path = "",
+        .subject = "stat:v1:4096:12:1710000000",
+    };
+    try std.testing.expectError(error.InvalidTransferPath, schema.validateEntry(unsafe));
+
+    const missing_baseline = schema.Entry{
+        .created_at = 123,
+        .host = "root@192.0.2.10",
+        .action_id = "resources/copy//srv/app",
+        .action_type = "delete_created_path",
+        .original_path = "/srv/app",
+        .backup_path = "",
+    };
+    try std.testing.expectError(error.InvalidRollbackManifestEntry, schema.validateEntry(missing_baseline));
+
+    const incomplete_baseline = schema.Entry{
+        .created_at = 123,
+        .host = "root@192.0.2.10",
+        .action_id = "resources/copy//srv/app",
+        .action_type = "delete_created_path",
+        .original_path = "/srv/app",
+        .backup_path = "",
+        .subject = "stat:v1:4096:12",
+    };
+    try std.testing.expectError(error.InvalidRollbackManifestEntry, schema.validateEntry(incomplete_baseline));
+}
+
 test "rollback manifest entries validate schema host and absolute paths" {
     const entry = schema.Entry{
         .created_at = 123,

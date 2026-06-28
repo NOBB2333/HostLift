@@ -17,6 +17,7 @@ pub const ModuleName = enum {
     firewall,
     network,
     dev_env,
+    resources,
     security,
     security_policy,
     processes,
@@ -104,6 +105,7 @@ pub const Action = struct {
     risk: RiskLevel,
     requires_confirmation: bool,
     recursive: bool = false,
+    file_count: u64 = 0,
 };
 
 // 完整迁移计划，包含兼容性判定结果和所有待执行动作。

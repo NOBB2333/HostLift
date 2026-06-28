@@ -7,7 +7,7 @@ pub fn print(writer: anytype) !void {
         \\  hostlift scan [--summary] [--output <path>] [--force] [--include-module <list>] [--exclude-module <list>]
         \\  hostlift manifest --path <path> [--output <path>] [--force] [--max-entries <n>]
         \\  hostlift manifest --verify <manifest.json> --path <path> [--max-entries <n>]
-        \\  hostlift plan --source <json> --target <json> [--summary] [--output <path>] [--force] [filters]
+        \\  hostlift plan --source <json> --target <json> [--summary|--selection|--health-report] [--output <path>] [--force] [filters]
         \\  hostlift validate --plan <json> [--policy <json>] [--summary]
         \\  hostlift apply --plan <json> --dry-run [filters]
         \\  hostlift apply --plan <json> [--source-host <user@ip>] --host <user@ip> --approve [--operator <id>] [--approval-ticket <id>] [--approval-receipt <path>] [--approval-receipt-key-env <name>] [--audit-log <path>|--audit-sink <target>] [--audit-mirror-log <path>] [--policy <json>] [--host-authz <path>] [filters] [--identity-file <path>|--credential-provider <provider>] [--remote-timeout <seconds>] [--remote-retries <n>] [--operation-id <id>] [--cancel-file <path>] [--operation-state <path>] [--transfer-transport scp|rsync|chunk] [--transfer-partial] [--transfer-resume] [--transfer-bwlimit <kbps>]
@@ -51,6 +51,8 @@ pub fn print(writer: anytype) !void {
         \\  --source <path>  源主机 inventory JSON
         \\  --target <path>  目标主机 inventory JSON
         \\  --summary        打印紧凑的人类可读摘要
+        \\  --selection      打印按个人迁移批次分组的可勾选 action 清单
+        \\  --health-report  打印迁移后健康检查清单，不执行探测或阻断 apply
         \\  --output <path>  写入文件
         \\  --force          覆盖已存在的输出文件
         \\  --include-module <list>  只保留逗号分隔模块中的动作
@@ -66,7 +68,7 @@ pub fn print(writer: anytype) !void {
         \\Apply 选项:
         \\  --plan <path>  迁移计划 JSON
         \\  --dry-run      只预览动作，不修改目标主机
-        \\  --source-host <user@ip>  copy_data_path 等动作使用的 SSH 源主机
+        \\  --source-host <user@ip>  copy_data_path 等动作使用的 SSH 源主机；source-host + rsync 会由源机推目标机并做 BatchMode 连通预检
         \\  --host <user@ip>  已批准 apply 使用的 SSH 目标主机
         \\  --approve      通过 SSH 执行已支持的动作
         \\  --operator <id>  写入审计日志的操作人标识；未提供时从 HOSTLIFT_OPERATOR、USER、LOGNAME 推断；policy 可限制
@@ -78,7 +80,7 @@ pub fn print(writer: anytype) !void {
         \\  --audit-mirror-log <path>  使用 syslog/HTTPS sink 时同步写入本地 JSONL 镜像，便于 audit verify/replay 补发；不能和 file sink 同用
         \\  --policy <path>  action 策略 JSON；策略不通过时拒绝 apply，可限制 plan hash/host/operator/ticket/scope
         \\  --host-authz <path>  本地主机授权 JSON；按 operator 限制可操作 host，不能替代真实身份认证/RBAC
-        \\  --identity-file <path>      SSH 私钥路径；会传给 apply 内部 SSH/scp/rsync/校验/rollback 相关调用
+        \\  --identity-file <path>      SSH 私钥路径；会传给 apply 内部 SSH/scp/rsync/校验/rollback 相关调用；source-host + rsync 仅用于控制机连源机，源机连目标机仍依赖源机 SSH 配置
         \\  --credential-provider <provider>  凭据来源；支持 ssh-agent 和 env:<name>，vault:<path> 失败关闭；不能和 --identity-file 同时使用
         \\  --firewall-reload  校验并 reload 已复制的防火墙配置
         \\  --ssh-port <port>  防火墙 reload 后必须继续允许的 SSH 端口
@@ -139,7 +141,7 @@ pub fn print(writer: anytype) !void {
         \\
         \\Transfer 选项:
         \\  --host <user@ip>   SSH 目标主机
-        \\  --source-host <user@ip>  远程到远程传输使用的 SSH 源主机
+        \\  --source-host <user@ip>  远程到远程传输使用的 SSH 源主机；rsync 模式会让源机推送到目标机
         \\  --source <path>    源路径
         \\  --target <path>    远程目标路径
         \\  --recursive        使用 scp -r 复制目录
@@ -147,14 +149,14 @@ pub fn print(writer: anytype) !void {
         \\  --manifest-output <path>  传输前写入本地源路径 manifest
         \\  --manifest-max-entries <n>  限制传输源 manifest 条目数
         \\  --verify-remote-manifest  approved 递归传输后比较本地源和远程目标 manifest
-        \\  --identity-file <path>  SSH 私钥路径；会传给 scp/rsync 和远程 manifest 校验
+        \\  --identity-file <path>  SSH 私钥路径；source-host + rsync 时只用于控制机连接源机，源机到目标机使用源机本地 SSH 配置
         \\  --credential-provider <provider>  凭据来源；支持 ssh-agent 和 env:<name>，vault:<path> 失败关闭；不能和 --identity-file 同时使用
         \\  --timeout <seconds>  单次 scp 子进程总超时，默认 60
         \\  --retries <n>        失败后重试次数，默认 0，最大 5
         \\  --operation-id <id>   操作标识，会写入 transfer plan 方便外部系统关联
         \\  --cancel-file <path>  本地取消标记文件；approved 传输前和每次重试前存在则停止
         \\  --operation-state <path>  本地 JSONL 状态文件；记录传输 started/succeeded/failed/cancelled
-        \\  --transport <name>   传输后端：scp、rsync 或 chunk，默认 scp；chunk 当前按文件粒度增量上传到 staging 后用远端 rsync 合并
+        \\  --transport <name>   传输后端：scp、rsync 或 chunk，默认 scp；source-host + rsync 要求源机能 BatchMode SSH 到目标机；chunk 当前按文件粒度增量上传到 staging 后用远端 rsync 合并
         \\  --partial            rsync 传输保留未完成文件，便于后续重试
         \\  --resume             rsync 传输使用 --append-verify 续传；会自动启用 --partial，不能和 scp 一起使用
         \\  --bwlimit <kbps>     传输限速，单位 Kbit/s；scp 使用 -l，rsync 转成 --bwlimit

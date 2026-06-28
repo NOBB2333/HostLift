@@ -17,6 +17,7 @@ pub const ActionInput = struct {
     requires_confirmation: bool,
     description: []const u8,
     recursive: bool = false,
+    file_count: u64 = 0,
 };
 
 // 构造并追加一条迁移动作，统一 action id、subject 和描述生成规则。
@@ -39,6 +40,7 @@ pub fn appendAction(
         .risk = input.risk,
         .requires_confirmation = input.requires_confirmation,
         .recursive = input.recursive,
+        .file_count = input.file_count,
     });
 }
 

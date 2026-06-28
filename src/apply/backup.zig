@@ -63,6 +63,113 @@ pub fn prepareRemoteRollbackWithOptions(
     }
 }
 
+// 为 HostLift 新建的数据路径写入删除型 rollback entry，并记录成功复制后的内容摘要基线。
+pub fn writeCreatedPathRollbackEntryWithOptions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    action: plan_schema.Action,
+    host: []const u8,
+    manifest_writer: anytype,
+    created_at: i64,
+    execution_options: remote_options.ExecutionOptions,
+) !bool {
+    if (action.action_type != .copy_data_path and action.action_type != .copy_project_path) return false;
+    const action_subject = apply_actions.subject(action);
+    if (action_subject.len == 0) return error.MissingApplySubject;
+    const baseline = try remoteCreatedPathBaseline(io, allocator, host, action_subject, execution_options);
+    const subject = try std.fmt.allocPrint(allocator, "stat:v1:{d}:{d}:{d}", .{ baseline.bytes, baseline.file_count, baseline.mtime_unix });
+    defer allocator.free(subject);
+    try rollback_manifest.writeEntry(manifest_writer, .{
+        .created_at = created_at,
+        .host = host,
+        .action_id = action.id,
+        .action_type = "delete_created_path",
+        .original_path = action_subject,
+        .backup_path = "",
+        .subject = subject,
+    });
+    return true;
+}
+
+const CreatedPathBaseline = struct {
+    bytes: u64,
+    file_count: u64,
+    mtime_unix: u64,
+};
+
+fn remoteCreatedPathBaseline(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    path: []const u8,
+    execution_options: remote_options.ExecutionOptions,
+) !CreatedPathBaseline {
+    return .{
+        .bytes = try remoteApparentBytes(io, allocator, host, path, execution_options),
+        .file_count = try remoteEntryCount(io, allocator, host, path, execution_options),
+        .mtime_unix = try remoteMtimeUnix(io, allocator, host, path, execution_options),
+    };
+}
+
+fn remoteApparentBytes(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    path: []const u8,
+    execution_options: remote_options.ExecutionOptions,
+) !u64 {
+    var du_bytes_argv = [_][]const u8{ "du", "-sb", path };
+    if (remote_exec.commandOutputWithOptions(io, allocator, host, du_bytes_argv[0..], execution_options, 16 * 1024)) |output| {
+        defer allocator.free(output);
+        return parseDuBytes(output) orelse error.RollbackBaselineUnavailable;
+    } else |_| {}
+    var du_kib_argv = [_][]const u8{ "du", "-sk", path };
+    const output = try remote_exec.commandOutputWithOptions(io, allocator, host, du_kib_argv[0..], execution_options, 16 * 1024);
+    defer allocator.free(output);
+    return (parseDuBytes(output) orelse return error.RollbackBaselineUnavailable) * 1024;
+}
+
+const max_rollback_baseline_entries: usize = 64 * 1024 * 1024;
+
+fn remoteEntryCount(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    path: []const u8,
+    execution_options: remote_options.ExecutionOptions,
+) !u64 {
+    var find_argv = [_][]const u8{ "find", path, "-xdev", "-printf", "." };
+    const output = remote_exec.commandOutputWithOptions(io, allocator, host, find_argv[0..], execution_options, max_rollback_baseline_entries) catch |err| switch (err) {
+        error.StreamTooLong => return error.RollbackBaselineUnavailable,
+        else => return err,
+    };
+    defer allocator.free(output);
+    return @intCast(output.len);
+}
+
+fn remoteMtimeUnix(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    path: []const u8,
+    execution_options: remote_options.ExecutionOptions,
+) !u64 {
+    var stat_argv = [_][]const u8{ "stat", "-c", "%Y", path };
+    const output = try remote_exec.commandOutputWithOptions(io, allocator, host, stat_argv[0..], execution_options, 16 * 1024);
+    defer allocator.free(output);
+    return parseFirstU64(output) orelse error.RollbackBaselineUnavailable;
+}
+
+fn parseDuBytes(output: []const u8) ?u64 {
+    var fields = std.mem.tokenizeAny(u8, output, " \t\r\n");
+    return std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch null;
+}
+
+fn parseFirstU64(output: []const u8) ?u64 {
+    var fields = std.mem.tokenizeAny(u8, output, " \t\r\n");
+    return std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch null;
+}
+
 // 如果远程目标已存在，则复制到 HostLift backup root 并返回备份路径。
 pub fn remotePathIfPresent(
     io: std.Io,
@@ -128,4 +235,9 @@ test "rollback backup paths preserve absolute target layout under backup root" {
 
     try std.testing.expectError(error.InvalidTransferPath, pathForTarget(std.testing.allocator, "/var/lib/hostlift/backups/123", "/"));
     try std.testing.expectError(error.InvalidTransferPath, pathForTarget(std.testing.allocator, "relative", "/etc/hosts"));
+}
+
+test "rollback baseline parses du output" {
+    try std.testing.expectEqual(@as(u64, 12345), parseDuBytes("12345\t/srv/app\n").?);
+    try std.testing.expectEqual(@as(u64, 1710000000), parseFirstU64("1710000000\n").?);
 }

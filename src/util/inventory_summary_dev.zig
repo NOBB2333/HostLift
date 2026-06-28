@@ -60,6 +60,11 @@ pub fn writeAppDataSummary(writer: anytype, appdata: inventory.AppDataInventory)
             try writer.writeAll("\nApp/data paths:\n");
             wrote_header = true;
         }
-        try writer.print("  - {s} [{s}] size={d}\n", .{ path.path, @tagName(path.kind), path.size });
+        try writer.print("  - {s} [{s}] size={d}", .{ path.path, @tagName(path.kind), path.size });
+        if (path.engine_hint) |hint| try writer.print(" engine={s}", .{hint});
+        if (path.dump_hint) |hint| try writer.print(" dump={s}", .{hint});
+        if (path.restore_hint) |hint| try writer.print(" restore={s}", .{hint});
+        if (path.consistency_hint) |hint| try writer.print(" consistency={s}", .{hint});
+        try writer.writeByte('\n');
     }
 }

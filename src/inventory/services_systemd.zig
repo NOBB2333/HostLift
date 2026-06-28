@@ -17,6 +17,7 @@ pub fn scanUnits(io: std.Io, allocator: std.mem.Allocator) ![]schema.ServiceUnit
         for (units.items) |unit| {
             allocator.free(unit.name);
             if (unit.path) |path| allocator.free(path);
+            if (unit.dependency_summary) |summary| allocator.free(summary);
         }
         units.deinit(allocator);
     }
@@ -30,6 +31,8 @@ pub fn scanUnits(io: std.Io, allocator: std.mem.Allocator) ![]schema.ServiceUnit
         const unit_path = try std.fs.path.join(allocator, &.{ "/etc/systemd/system", name });
         defer allocator.free(unit_path);
         const custom = probe.pathExists(io, unit_path);
+        const dependency_summary = try collectUnitDependencySummary(io, allocator, name);
+        errdefer if (dependency_summary) |summary| allocator.free(summary);
 
         try units.append(allocator, .{
             .name = try allocator.dupe(u8, name),
@@ -37,10 +40,52 @@ pub fn scanUnits(io: std.Io, allocator: std.mem.Allocator) ![]schema.ServiceUnit
             .active_state = if (active_output) |active| findServiceActiveState(active, name) else .unknown,
             .custom = custom,
             .path = if (custom) try allocator.dupe(u8, unit_path) else null,
+            .dependency_summary = dependency_summary,
         });
     }
 
     return units.toOwnedSlice(allocator);
+}
+
+fn collectUnitDependencySummary(io: std.Io, allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    const output = probe.runCommand(
+        io,
+        allocator,
+        &.{ "systemctl", "show", name, "--no-pager", "--property=Requires,Wants,After,EnvironmentFiles,ExecStart" },
+        128 * 1024,
+    ) catch return null;
+    defer allocator.free(output);
+    return summarizeUnitProperties(allocator, output);
+}
+
+fn summarizeUnitProperties(allocator: std.mem.Allocator, output: []const u8) !?[]const u8 {
+    var summary: std.ArrayList(u8) = .empty;
+    errdefer summary.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0 or std.mem.endsWith(u8, line, "=")) continue;
+        if (!interestingUnitProperty(line)) continue;
+        if (summary.items.len > 0) try summary.appendSlice(allocator, "; ");
+        const remaining = 1024 - @min(summary.items.len, 1024);
+        if (remaining == 0) break;
+        try summary.appendSlice(allocator, line[0..@min(line.len, remaining)]);
+        if (summary.items.len >= 1024) break;
+    }
+    if (summary.items.len == 0) {
+        summary.deinit(allocator);
+        return null;
+    }
+    return @as(?[]const u8, try summary.toOwnedSlice(allocator));
+}
+
+fn interestingUnitProperty(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "Requires=") or
+        std.mem.startsWith(u8, line, "Wants=") or
+        std.mem.startsWith(u8, line, "After=") or
+        std.mem.startsWith(u8, line, "EnvironmentFiles=") or
+        std.mem.startsWith(u8, line, "ExecStart=");
 }
 
 // 扫描 systemd timer 及其激活目标。

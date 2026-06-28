@@ -60,11 +60,12 @@ test "builder creates user ssh cron and config review actions" {
     var migration_plan = try builder.build(std.testing.allocator, source, target, 0);
     defer migration_plan.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 5), migration_plan.actions.len);
+    try std.testing.expectEqual(@as(usize, 6), migration_plan.actions.len);
     try std.testing.expect(hasAction(migration_plan.actions, .install_cron_entry, "cron/install//etc/cron.d/app"));
     try std.testing.expect(hasAction(migration_plan.actions, .create_group, "users/create-group/deploy"));
     try std.testing.expect(hasAction(migration_plan.actions, .create_user, "users/create-user/deploy"));
     try std.testing.expect(hasAction(migration_plan.actions, .add_authorized_key, "ssh/authorized-keys/deploy"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "configs/merge-review//etc/nginx/nginx.conf"));
     try std.testing.expect(hasAction(migration_plan.actions, .write_file, "configs/write//etc/nginx/nginx.conf"));
     for (migration_plan.actions) |action| {
         if (action.action_type == .create_user) {
@@ -226,7 +227,7 @@ test "builder creates service review actions for timers and user units" {
     }
 }
 
-test "builder creates manual review for active source service runtime drift" {
+test "builder creates manual start review for active source service runtime drift" {
     var source_units = [_]inventory.ServiceUnit{.{
         .name = "worker.service",
         .state = .enabled,
@@ -249,9 +250,10 @@ test "builder creates manual review for active source service runtime drift" {
     var migration_plan = try builder.build(std.testing.allocator, source, target, 0);
     defer migration_plan.deinit(std.testing.allocator);
 
-    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "services/review-runtime/worker.service"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "services/review-start/worker.service"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "services/check-status/worker.service"));
     for (migration_plan.actions) |action| {
-        if (std.mem.eql(u8, action.id, "services/review-runtime/worker.service")) {
+        if (std.mem.eql(u8, action.id, "services/review-start/worker.service")) {
             try std.testing.expectEqual(plan.ModuleName.services, action.module);
             try std.testing.expectEqual(plan.RiskLevel.high, action.risk);
             try std.testing.expect(action.requires_confirmation);
@@ -567,10 +569,19 @@ test "builder does not create actions when inventories are incompatible" {
     try std.testing.expectEqual(@as(usize, 0), migration_plan.actions.len);
 }
 
-test "builder creates app data copy actions with higher risk for database paths" {
+test "builder creates app data copy actions and dump review for database paths" {
     var source_paths = [_]inventory.DataPath{
         .{ .path = "/srv/app", .present = true, .kind = .app_data, .size = 0 },
-        .{ .path = "/var/lib/mysql", .present = true, .kind = .database_data, .size = 0 },
+        .{
+            .path = "/var/lib/mysql",
+            .present = true,
+            .kind = .database_data,
+            .size = 0,
+            .engine_hint = "mysql/mariadb",
+            .dump_hint = "mysqldump --single-transaction --all-databases > mysql-all.sql",
+            .restore_hint = "mysql < mysql-all.sql",
+            .consistency_hint = "stop writes before restore",
+        },
     };
     const source = fixture(.{
         .appdata = .{ .paths = source_paths[0..] },
@@ -581,10 +592,14 @@ test "builder creates app data copy actions with higher risk for database paths"
     defer migration_plan.deinit(std.testing.allocator);
 
     try std.testing.expect(hasAction(migration_plan.actions, .copy_data_path, "appdata/copy//srv/app"));
-    try std.testing.expect(hasAction(migration_plan.actions, .copy_data_path, "appdata/copy//var/lib/mysql"));
+    try std.testing.expect(!hasAction(migration_plan.actions, .copy_data_path, "appdata/copy//var/lib/mysql"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "appdata/dump-restore//var/lib/mysql"));
     for (migration_plan.actions) |action| {
-        if (std.mem.eql(u8, action.id, "appdata/copy//var/lib/mysql")) {
+        if (std.mem.eql(u8, action.id, "appdata/dump-restore//var/lib/mysql")) {
             try std.testing.expectEqual(plan.RiskLevel.high, action.risk);
+            try std.testing.expect(std.mem.indexOf(u8, action.description, "dump") != null);
+            try std.testing.expect(std.mem.indexOf(u8, action.description, "mysqldump") != null);
+            try std.testing.expect(std.mem.indexOf(u8, action.description, "mysql/mariadb") != null);
         }
     }
 }
@@ -735,6 +750,32 @@ test "builder creates manual review actions for container runtime facts" {
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/review-network/app-net"));
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/review-compose//srv/app"));
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/review-container/app"));
+}
+
+test "builder upgrades critical scan warnings to manual actions" {
+    var source_warnings = [_][]const u8{
+        "scan module users failed: AccessDenied",
+        "scan module docker failed: DockerUnavailable",
+    };
+    var target_warnings = [_][]const u8{
+        "scan module storage failed: DfUnavailable",
+    };
+    var source = fixture(.{});
+    source.scan.warnings = source_warnings[0..];
+    var target = fixture(.{});
+    target.scan.warnings = target_warnings[0..];
+
+    var migration_plan = try builder.build(std.testing.allocator, source, target, 0);
+    defer migration_plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "scan-warning/source/users"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "scan-warning/target/storage"));
+    try std.testing.expect(!hasAction(migration_plan.actions, .manual_step, "scan-warning/source/docker"));
+    for (migration_plan.actions) |action| {
+        if (std.mem.eql(u8, action.id, "scan-warning/source/users")) {
+            try std.testing.expectEqual(plan.RiskLevel.critical, action.risk);
+        }
+    }
 }
 
 // 测试辅助：判断计划中是否包含指定 action。

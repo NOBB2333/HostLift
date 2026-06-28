@@ -124,6 +124,16 @@ fn userCommand(allocator: std.mem.Allocator, unit_ref: []const u8, verb: []const
     return common.commandWithoutOwned(allocator, argv);
 }
 
+// 生成 systemctl <verb> <service> 命令。
+fn systemctlVerbCommand(allocator: std.mem.Allocator, verb: []const u8, service: []const u8) !common.Command {
+    if (service.len == 0) return error.MissingApplySubject;
+    const argv = try allocator.alloc([]const u8, 3);
+    argv[0] = "systemctl";
+    argv[1] = verb;
+    argv[2] = service;
+    return common.commandWithoutOwned(allocator, argv);
+}
+
 // 拼接 rc-update 命令，操作指定 runlevel 下的服务。
 fn openRcCommand(allocator: std.mem.Allocator, verb: []const u8, service: []const u8, runlevel: []const u8) !common.Command {
     if (service.len == 0 or runlevel.len == 0) return error.InvalidOpenRcServiceRef;

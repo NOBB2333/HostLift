@@ -12,6 +12,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, w
     var target_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var summary = false;
+    var selection = false;
+    var health_report = false;
     var force = false;
     var filter: plan_filter.ActionFilter = .empty;
     defer filter.deinit(allocator);
@@ -33,6 +35,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, w
             output_path = args[index];
         } else if (std.mem.eql(u8, arg, "--summary")) {
             summary = true;
+        } else if (std.mem.eql(u8, arg, "--selection")) {
+            selection = true;
+        } else if (std.mem.eql(u8, arg, "--health-report")) {
+            health_report = true;
         } else if (std.mem.eql(u8, arg, "--force")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "--include-module")) {
@@ -58,6 +64,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, w
 
     const source_file = source_path orelse return error.MissingSourcePath;
     const target_file = target_path orelse return error.MissingTargetPath;
+    var output_modes: u8 = 0;
+    if (summary) output_modes += 1;
+    if (selection) output_modes += 1;
+    if (health_report) output_modes += 1;
+    if (output_modes > 1) return error.ConflictingPlanOutputMode;
 
     const source_bytes = try fs_util.readFileAlloc(io, allocator, source_file, 16 * 1024 * 1024);
     defer allocator.free(source_bytes);
@@ -85,14 +96,22 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, w
 
         var buffer: [4096]u8 = undefined;
         var file_writer = file.writer(io, &buffer);
-        if (summary) {
+        if (selection) {
+            try summary_util.writePlanSelection(&file_writer.interface, migration_plan);
+        } else if (health_report) {
+            try summary_util.writePlanHealthReport(&file_writer.interface, migration_plan);
+        } else if (summary) {
             try summary_util.writePlanSummary(&file_writer.interface, migration_plan);
         } else {
             try json_util.writePlan(&file_writer.interface, migration_plan);
         }
         try file_writer.flush();
     } else {
-        if (summary) {
+        if (selection) {
+            try summary_util.writePlanSelection(writer, migration_plan);
+        } else if (health_report) {
+            try summary_util.writePlanHealthReport(writer, migration_plan);
+        } else if (summary) {
             try summary_util.writePlanSummary(writer, migration_plan);
         } else {
             try json_util.writePlan(writer, migration_plan);

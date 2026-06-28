@@ -34,10 +34,21 @@ pub const SshdConfigFact = struct {
     value: []const u8,
 };
 
+// SSH host key 摘要；不读取私钥内容，只记录存在性和公钥指纹。
+pub const SshHostKeyFact = struct {
+    key_type: []const u8,
+    private_path: []const u8,
+    public_path: []const u8,
+    private_present: bool,
+    public_present: bool,
+    fingerprint: ?[]const u8 = null,
+};
+
 // SSH 清单。
 pub const SshInventory = struct {
     authorized_keys: []AuthorizedKeys,
     sshd_config_present: bool,
     client_config_present: bool,
     sshd_config: []SshdConfigFact = &.{},
+    host_keys: []SshHostKeyFact = &.{},
 };

@@ -2,6 +2,12 @@
 
 本文件是版本变更索引。每个版本的完整变更记录在 [docs/changelog/](changelog/) 目录下。
 
+## 当前未发布工作区 - 2026-06-28
+
+当前工作区已在 0.1.0 之后继续补齐个人服务器迁移能力。已接入 20 个 scan 模块，新增 `resources` 整机资源地图、`plan --selection` 批次化选择清单、`plan --health-report` 迁移后健康检查报告、source-host + rsync、apply 前容量/inode 复核、有状态数据 dump/restore 人工操作清单、resources 轻量安全报告、systemd 依赖摘要、Docker stop-writers 提示、operation state 文件锁，以及带 `stat:v1:<bytes>:<file_count>:<mtime>` 基线的新建路径删除型 rollback entry。
+
+这些改动仍按“个人服务器选择性迁移”定位；企业 RBAC、在线审批、Vault/短期凭据、SIEM 级审计队列、完整 TUI、自动数据库 dump/restore hook、字节块级 chunk 和多发行版认证矩阵仍是后续增强，不属于当前默认主线。
+
 ## [0.1.0] - 2026-06-12
 
 首个公开版本。Linux 主机迁移工具，支持 scan → plan → validate → apply → audit → rollback 全流程。

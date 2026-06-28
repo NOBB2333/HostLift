@@ -14,6 +14,10 @@ pub const DataPath = struct {
     present: bool,
     kind: DataPathKind,
     size: u64,
+    engine_hint: ?[]const u8 = null,
+    dump_hint: ?[]const u8 = null,
+    restore_hint: ?[]const u8 = null,
+    consistency_hint: ?[]const u8 = null,
 };
 
 // 应用数据清单汇总。
@@ -80,6 +84,7 @@ pub const DockerContainer = struct {
     image: []const u8,
     status: []const u8,
     ports: []const u8,
+    mounts: ?[]const u8 = null,
     compose_project: ?[]const u8 = null,
     compose_service: ?[]const u8 = null,
     compose_workdir: ?[]const u8 = null,

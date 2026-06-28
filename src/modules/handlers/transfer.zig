@@ -6,9 +6,13 @@ const apply_actions = @import("../../apply/actions.zig");
 const apply_permissions = @import("../../apply/permissions.zig");
 const firewall_backend = @import("../../firewall/backend.zig");
 const firewall_reload = @import("../../firewall/reload.zig");
+const remote_exec = @import("../../remote/exec.zig");
 const remote_planner = @import("../../remote/planner.zig");
+const remote_preflight = @import("../../remote/preflight.zig");
+const remote_schema = @import("../../remote/schema.zig");
 const remote_manifest = @import("../../transport/manifest.zig");
 const transfer_command = @import("../../transfer/command.zig");
+const path_util = @import("../../util/paths.zig");
 
 // 声明文件型 action 在目标机器执行前需要具备的入口命令。
 pub fn applyRequirements(ctx: handler.ApplyRequirementsContext, action: plan.Action) []const []const u8 {
@@ -45,6 +49,8 @@ pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResul
     if (action.action_type == .copy_home_config) {
         try apply_permissions.prepareHomeConfigParentWithOptions(ctx.io, ctx.allocator, ctx.target_host, action, action_subject, ctx.stdout, ctx.stderr, ctx.options.execution);
     }
+    try preflightTransfer(ctx, transfer_plan);
+    try preflightCapacity(ctx, action, transfer_plan);
     try transfer_command.executePlan(ctx.io, ctx.allocator, transfer_plan, ctx.stdout, ctx.stderr);
     if (action.action_type == .add_authorized_key) {
         try apply_permissions.fixAuthorizedKeysWithOptions(ctx.io, ctx.allocator, ctx.target_host, action, action_subject, ctx.stdout, ctx.stderr, ctx.options.execution);
@@ -59,6 +65,182 @@ pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResul
         });
     }
     return .{ .changed = true };
+}
+
+fn preflightTransfer(ctx: handler.ApplyContext, transfer_plan: remote_schema.TransferPlan) !void {
+    try remote_preflight.runTransferPreflight(ctx.io, ctx.allocator, transfer_plan, ctx.options.execution);
+}
+
+fn preflightCapacity(ctx: handler.ApplyContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan) !void {
+    if (!shouldCheckCapacity(action, transfer_plan)) return;
+    const required_bytes = try sourceApparentBytes(ctx, transfer_plan);
+    if (required_bytes == 0) return;
+    const target_parent = try path_util.parentDirAlloc(ctx.allocator, transfer_plan.target_path);
+    defer ctx.allocator.free(target_parent);
+    const capacity = try remoteCapacity(ctx, target_parent);
+    if (capacity.available_bytes <= required_bytes) return error.TargetCapacityInsufficient;
+    if (capacity.available_inodes == 0) return error.TargetInodeCapacityUnavailable;
+    const required_inodes = try sourceEntryCount(ctx, action, transfer_plan, capacity.available_inodes);
+    if (required_inodes.count > 0 and required_inodes.count >= capacity.available_inodes) return error.TargetInodeCapacityInsufficient;
+    try ctx.stdout.print("capacity preflight {s}: need={d}B available={d}B files={s}{d} iavail={d}\n", .{
+        action.id,
+        required_bytes,
+        capacity.available_bytes,
+        if (required_inodes.overflow) ">" else "",
+        required_inodes.count,
+        capacity.available_inodes,
+    });
+}
+
+fn shouldCheckCapacity(action: plan.Action, transfer_plan: remote_schema.TransferPlan) bool {
+    if (!transfer_plan.recursive) return false;
+    return action.action_type == .copy_data_path or action.action_type == .copy_project_path;
+}
+
+const RemoteCapacity = struct {
+    available_bytes: u64,
+    available_inodes: u64,
+};
+
+const SourceEntryCount = struct {
+    count: u64 = 0,
+    overflow: bool = false,
+};
+
+fn remoteCapacity(ctx: handler.ApplyContext, path: []const u8) !RemoteCapacity {
+    var df_bytes_argv = [_][]const u8{ "df", "-PB1", path };
+    const bytes_output = try remote_exec.commandOutputWithOptions(ctx.io, ctx.allocator, ctx.target_host, df_bytes_argv[0..], ctx.options.execution, 16 * 1024);
+    defer ctx.allocator.free(bytes_output);
+    var df_inode_argv = [_][]const u8{ "df", "-Pi", path };
+    const inode_output = try remote_exec.commandOutputWithOptions(ctx.io, ctx.allocator, ctx.target_host, df_inode_argv[0..], ctx.options.execution, 16 * 1024);
+    defer ctx.allocator.free(inode_output);
+    return .{
+        .available_bytes = parseDfAvailable(bytes_output) orelse return error.TargetCapacityUnavailable,
+        .available_inodes = parseDfAvailable(inode_output) orelse return error.TargetInodeCapacityUnavailable,
+    };
+}
+
+fn sourceApparentBytes(ctx: handler.ApplyContext, transfer_plan: remote_schema.TransferPlan) !u64 {
+    if (transfer_plan.source_host) |source_host| {
+        return remoteApparentBytes(ctx.io, ctx.allocator, source_host, transfer_plan.source_path, ctx.options.execution);
+    }
+    return localApparentBytes(ctx.io, ctx.allocator, transfer_plan.source_path);
+}
+
+fn sourceEntryCount(ctx: handler.ApplyContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan, available_inodes: u64) !SourceEntryCount {
+    var result = SourceEntryCount{ .count = action.file_count };
+    if (result.count >= available_inodes and result.count > 0) return result;
+
+    const limit = inodeProbeLimit(available_inodes);
+    const probed = if (transfer_plan.source_host) |source_host|
+        try remoteEntryCount(ctx.io, ctx.allocator, source_host, transfer_plan.source_path, ctx.options.execution, limit)
+    else
+        try localEntryCount(ctx.io, ctx.allocator, transfer_plan.source_path, limit);
+    if (probed.count > result.count) result.count = probed.count;
+    result.overflow = probed.overflow;
+    return result;
+}
+
+const max_inode_probe_entries: usize = 64 * 1024 * 1024;
+
+fn inodeProbeLimit(available_inodes: u64) usize {
+    const wanted = std.math.add(u64, available_inodes, 1) catch std.math.maxInt(u64);
+    const capped = @min(wanted, max_inode_probe_entries);
+    return @intCast(@min(capped, std.math.maxInt(usize)));
+}
+
+fn remoteEntryCount(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    path: []const u8,
+    execution: @import("../../remote/options.zig").ExecutionOptions,
+    limit: usize,
+) !SourceEntryCount {
+    var argv = [_][]const u8{ "find", path, "-xdev", "-printf", "." };
+    const output = remote_exec.commandOutputWithOptions(io, allocator, host, argv[0..], execution, limit) catch |err| switch (err) {
+        error.StreamTooLong => return .{ .count = limit, .overflow = true },
+        else => return err,
+    };
+    defer allocator.free(output);
+    return .{ .count = output.len };
+}
+
+fn localEntryCount(io: std.Io, allocator: std.mem.Allocator, path: []const u8, limit: usize) !SourceEntryCount {
+    const argv = [_][]const u8{ "find", path, "-xdev", "-printf", "." };
+    const output = runLocalCommand(io, allocator, argv[0..], limit) catch |err| switch (err) {
+        error.StreamTooLong => return .{ .count = limit, .overflow = true },
+        else => return err,
+    };
+    defer allocator.free(output);
+    return .{ .count = output.len };
+}
+
+fn remoteApparentBytes(io: std.Io, allocator: std.mem.Allocator, host: []const u8, path: []const u8, execution: @import("../../remote/options.zig").ExecutionOptions) !u64 {
+    var du_bytes_argv = [_][]const u8{ "du", "-sb", path };
+    if (remote_exec.commandOutputWithOptions(io, allocator, host, du_bytes_argv[0..], execution, 16 * 1024)) |output| {
+        defer allocator.free(output);
+        return parseDuBytes(output) orelse error.SourceSizeUnavailable;
+    } else |_| {}
+    var du_kib_argv = [_][]const u8{ "du", "-sk", path };
+    const output = try remote_exec.commandOutputWithOptions(io, allocator, host, du_kib_argv[0..], execution, 16 * 1024);
+    defer allocator.free(output);
+    return (parseDuBytes(output) orelse return error.SourceSizeUnavailable) * 1024;
+}
+
+fn localApparentBytes(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !u64 {
+    const du_bytes_argv = [_][]const u8{ "du", "-sb", path };
+    if (runLocalCommand(io, allocator, du_bytes_argv[0..], 16 * 1024)) |output| {
+        defer allocator.free(output);
+        return parseDuBytes(output) orelse error.SourceSizeUnavailable;
+    } else |_| {}
+    const du_kib_argv = [_][]const u8{ "du", "-sk", path };
+    const output = try runLocalCommand(io, allocator, du_kib_argv[0..], 16 * 1024);
+    defer allocator.free(output);
+    return (parseDuBytes(output) orelse return error.SourceSizeUnavailable) * 1024;
+}
+
+fn runLocalCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, limit: usize) ![]u8 {
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(limit),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| {
+            if (code != 0) {
+                allocator.free(result.stdout);
+                return error.CommandFailed;
+            }
+        },
+        else => {
+            allocator.free(result.stdout);
+            return error.CommandFailed;
+        },
+    }
+    return result.stdout;
+}
+
+fn parseDuBytes(output: []const u8) ?u64 {
+    var fields = std.mem.tokenizeAny(u8, output, " \t\r\n");
+    return std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch null;
+}
+
+fn parseDfAvailable(output: []const u8) ?u64 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    _ = lines.next() orelse return null;
+    var last: ?[]const u8 = null;
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len > 0) last = line;
+    }
+    const line = last orelse return null;
+    var fields = std.mem.tokenizeAny(u8, line, " \t");
+    _ = fields.next() orelse return null;
+    _ = fields.next() orelse return null;
+    _ = fields.next() orelse return null;
+    return std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch null;
 }
 
 // 根据防火墙后端和恢复窗口返回目标机所需的前置命令。
@@ -141,4 +323,14 @@ test "transfer verifier checksum eligibility is single-file only" {
         .requires_confirmation = true,
         .recursive = true,
     }));
+}
+
+test "transfer preflight parses du and df output" {
+    try std.testing.expectEqual(@as(u64, 4096), parseDuBytes("4096\t/srv/app\n").?);
+    try std.testing.expectEqual(@as(u64, 5368709120), parseDfAvailable(
+        \\Filesystem     1B-blocks       Used  Available Capacity Mounted on
+        \\/dev/vda1    10737418240 5368709120 5368709120      50% /srv
+    ).?);
+    try std.testing.expectEqual(@as(usize, 101), inodeProbeLimit(100));
+    try std.testing.expectEqual(@as(usize, max_inode_probe_entries), inodeProbeLimit(std.math.maxInt(u64)));
 }

@@ -6,9 +6,20 @@ const max_mount_entries = 512;
 
 // 扫描 fstab 和当前挂载点事实，不执行 mount/umount。
 pub fn scan(io: std.Io, allocator: std.mem.Allocator) !schema.StorageInventory {
+    const fstab_entries = try parseFstabFile(io, allocator, "/etc/fstab");
+    errdefer freeFstabEntries(allocator, fstab_entries);
+    const mounts = try parseMountInfoFile(io, allocator, "/proc/self/mountinfo");
+    errdefer freeMountEntries(allocator, mounts);
+    try enrichMountCapacity(io, allocator, mounts);
+    const memory = try readMemoryCapacity(io, allocator);
+
     return .{
-        .fstab_entries = try parseFstabFile(io, allocator, "/etc/fstab"),
-        .mounts = try parseMountInfoFile(io, allocator, "/proc/self/mountinfo"),
+        .fstab_entries = fstab_entries,
+        .mounts = mounts,
+        .memory_total_bytes = memory.memory_total_bytes,
+        .memory_available_bytes = memory.memory_available_bytes,
+        .swap_total_bytes = memory.swap_total_bytes,
+        .swap_free_bytes = memory.swap_free_bytes,
         .truncated = false,
     };
 }
@@ -113,6 +124,89 @@ fn parseMountInfoLine(allocator: std.mem.Allocator, line: []const u8) !?schema.M
     };
 }
 
+fn enrichMountCapacity(io: std.Io, allocator: std.mem.Allocator, mounts: []schema.MountEntry) !void {
+    for (mounts) |*mount| {
+        const capacity = readMountCapacity(io, allocator, mount.mount_point) orelse continue;
+        mount.total_bytes = capacity.total_bytes;
+        mount.available_bytes = capacity.available_bytes;
+        mount.total_inodes = capacity.total_inodes;
+        mount.available_inodes = capacity.available_inodes;
+    }
+}
+
+const MountCapacity = struct {
+    total_bytes: u64 = 0,
+    available_bytes: u64 = 0,
+    total_inodes: u64 = 0,
+    available_inodes: u64 = 0,
+};
+
+fn readMountCapacity(io: std.Io, allocator: std.mem.Allocator, mount_point: []const u8) ?MountCapacity {
+    const output = probe.runCommand(io, allocator, &.{ "df", "-PB1", "--output=size,avail,itotal,iavail", mount_point }, 64 * 1024) catch return null;
+    defer allocator.free(output);
+    return parseDfCapacity(output);
+}
+
+fn parseDfCapacity(output: []const u8) ?MountCapacity {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    _ = lines.next() orelse return null;
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        return .{
+            .total_bytes = parseDfU64(fields.next() orelse return null) orelse return null,
+            .available_bytes = parseDfU64(fields.next() orelse return null) orelse return null,
+            .total_inodes = parseDfU64(fields.next() orelse "0") orelse 0,
+            .available_inodes = parseDfU64(fields.next() orelse "0") orelse 0,
+        };
+    }
+    return null;
+}
+
+fn parseDfU64(value: []const u8) ?u64 {
+    if (std.mem.eql(u8, value, "-")) return 0;
+    return std.fmt.parseUnsigned(u64, value, 10) catch null;
+}
+
+const MemoryCapacity = struct {
+    memory_total_bytes: u64 = 0,
+    memory_available_bytes: u64 = 0,
+    swap_total_bytes: u64 = 0,
+    swap_free_bytes: u64 = 0,
+};
+
+fn readMemoryCapacity(io: std.Io, allocator: std.mem.Allocator) !MemoryCapacity {
+    const contents = probe.readWholeFile(io, allocator, "/proc/meminfo") catch return .{};
+    defer allocator.free(contents);
+    return parseMeminfo(contents);
+}
+
+fn parseMeminfo(contents: []const u8) MemoryCapacity {
+    var capacity: MemoryCapacity = .{};
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |line| {
+        if (parseMeminfoLine(line, "MemTotal:")) |value| {
+            capacity.memory_total_bytes = value;
+        } else if (parseMeminfoLine(line, "MemAvailable:")) |value| {
+            capacity.memory_available_bytes = value;
+        } else if (parseMeminfoLine(line, "SwapTotal:")) |value| {
+            capacity.swap_total_bytes = value;
+        } else if (parseMeminfoLine(line, "SwapFree:")) |value| {
+            capacity.swap_free_bytes = value;
+        }
+    }
+    return capacity;
+}
+
+fn parseMeminfoLine(line: []const u8, key: []const u8) ?u64 {
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, key)) return null;
+    var fields = std.mem.tokenizeAny(u8, trimmed[key.len..], " \t");
+    const kib = std.fmt.parseUnsigned(u64, fields.next() orelse return null, 10) catch return null;
+    return kib * 1024;
+}
+
 // 释放 fstab 条目数组。
 fn freeFstabEntries(allocator: std.mem.Allocator, entries: []schema.FstabEntry) void {
     for (entries) |entry| {
@@ -210,4 +304,30 @@ test "parse mountinfo decodes octal escaped paths" {
     try std.testing.expectEqual(@as(usize, 1), entries.len);
     try std.testing.expectEqualStrings("/mnt/data one", entries[0].mount_point);
     try std.testing.expectEqualStrings("/dev/disk one", entries[0].source);
+}
+
+test "parse df capacity extracts bytes and inodes" {
+    const capacity = parseDfCapacity(
+        \\  1B-blocks       Avail     Inodes     IAvail
+        \\10737418240  5368709120    1000000     900000
+    ).?;
+
+    try std.testing.expectEqual(@as(u64, 10_737_418_240), capacity.total_bytes);
+    try std.testing.expectEqual(@as(u64, 5_368_709_120), capacity.available_bytes);
+    try std.testing.expectEqual(@as(u64, 1_000_000), capacity.total_inodes);
+    try std.testing.expectEqual(@as(u64, 900_000), capacity.available_inodes);
+}
+
+test "parse meminfo extracts memory and swap bytes" {
+    const capacity = parseMeminfo(
+        \\MemTotal:       16384 kB
+        \\MemAvailable:    8192 kB
+        \\SwapTotal:       4096 kB
+        \\SwapFree:        2048 kB
+    );
+
+    try std.testing.expectEqual(@as(u64, 16_777_216), capacity.memory_total_bytes);
+    try std.testing.expectEqual(@as(u64, 8_388_608), capacity.memory_available_bytes);
+    try std.testing.expectEqual(@as(u64, 4_194_304), capacity.swap_total_bytes);
+    try std.testing.expectEqual(@as(u64, 2_097_152), capacity.swap_free_bytes);
 }

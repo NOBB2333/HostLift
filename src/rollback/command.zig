@@ -157,6 +157,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, s
 
 // 输出单条 rollback entry 的 dry-run 预览格式。
 fn printDryRunEntry(stdout: anytype, entry: manifest.Entry) !void {
+    if (std.mem.eql(u8, entry.action_type, "delete_created_path")) {
+        try stdout.print(
+            "  - rollback {s}: delete entire HostLift-created path {s} on {s} if baseline still matches {s}; changed paths fail closed\n",
+            .{ entry.action_id, entry.original_path, entry.host, entry.subject },
+        );
+        return;
+    }
     if (entry.subject.len > 0 and entry.original_path.len == 0 and entry.backup_path.len == 0) {
         try stdout.print(
             "  - rollback {s}: {s} on {s}\n",

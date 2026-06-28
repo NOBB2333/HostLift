@@ -12,6 +12,8 @@ pub fn appendActions(
     target: inventory.ServiceInventory,
 ) !void {
     try appendServiceUnitActions(allocator, actions, source.units, target.units);
+    try appendDropInActions(allocator, actions, source.drop_ins, target.drop_ins);
+    try appendEnvFileActions(allocator, actions, source.env_files, target.env_files);
     try appendTimerActions(allocator, actions, source.timers, target.timers);
     try appendSocketActions(allocator, actions, source.sockets, target.sockets);
 }
@@ -49,16 +51,75 @@ fn appendServiceUnitActions(
             });
         }
 
-        if (serviceRuntimeNeedsReview(target_units, unit)) {
+        if (dependencySummaryNeedsReview(target_units, unit)) {
             try manual.appendManualStep(allocator, actions, .{
-                .id_prefix = "services/review-runtime",
+                .id_prefix = "services/review-deps",
                 .name = unit.name,
                 .subject = unit.name,
                 .module = .services,
                 .risk = .high,
-                .description = "Review running systemd service before starting on target",
+                .description = "Review systemd dependency graph before migration; compare Requires/Wants/After/EnvironmentFile/ExecStart and merge target-specific differences manually",
             });
         }
+
+        if (serviceRuntimeNeedsReview(target_units, unit)) {
+            try manual.appendManualStep(allocator, actions, .{
+                .id_prefix = "services/review-start",
+                .name = unit.name,
+                .subject = unit.name,
+                .module = .services,
+                .risk = .high,
+                .description = "Review whether to start this source-active service after package, config, data and dependency checks; HostLift does not start services by default",
+            });
+            try manual.appendManualStep(allocator, actions, .{
+                .id_prefix = "services/check-status",
+                .name = unit.name,
+                .subject = unit.name,
+                .module = .services,
+                .risk = .high,
+                .description = "Check systemctl status, journal tail, expected ports and service-specific health after migration; HostLift reports failures without acting as a heavy gate",
+            });
+        }
+    }
+}
+
+// 规划 systemd drop-in 配置片段的人工审查动作。
+fn appendDropInActions(
+    allocator: std.mem.Allocator,
+    actions: *std.ArrayList(plan.Action),
+    source_drop_ins: []const inventory.SystemdDropIn,
+    target_drop_ins: []const inventory.SystemdDropIn,
+) !void {
+    for (source_drop_ins) |drop_in| {
+        if (hasEquivalentDropIn(target_drop_ins, drop_in)) continue;
+        try manual.appendManualStep(allocator, actions, .{
+            .id_prefix = "services/review-drop-in",
+            .name = drop_in.path,
+            .subject = drop_in.unit,
+            .module = .services,
+            .risk = .high,
+            .description = "Review systemd drop-in override before migration; merge with target unit instead of blindly overwriting",
+        });
+    }
+}
+
+// 规划服务环境文件的人工审查动作。
+fn appendEnvFileActions(
+    allocator: std.mem.Allocator,
+    actions: *std.ArrayList(plan.Action),
+    source_env_files: []const inventory.ServiceEnvFile,
+    target_env_files: []const inventory.ServiceEnvFile,
+) !void {
+    for (source_env_files) |env_file| {
+        if (hasEquivalentEnvFile(target_env_files, env_file)) continue;
+        try manual.appendManualStep(allocator, actions, .{
+            .id_prefix = "services/review-env",
+            .name = env_file.path,
+            .subject = env_file.unit,
+            .module = .services,
+            .risk = .high,
+            .description = "Review service environment file before migration; variables often contain host-specific paths, ports or credentials",
+        });
     }
 }
 
@@ -178,6 +239,17 @@ fn serviceRuntimeNeedsReview(target_units: []const inventory.ServiceUnit, source
     return !isActiveLike(serviceActiveState(target_units, source.name));
 }
 
+fn dependencySummaryNeedsReview(target_units: []const inventory.ServiceUnit, source: inventory.ServiceUnit) bool {
+    const source_summary = source.dependency_summary orelse return false;
+    if (source_summary.len == 0) return false;
+    for (target_units) |unit| {
+        if (!std.mem.eql(u8, unit.name, source.name)) continue;
+        if (unit.dependency_summary == null) return true;
+        return !std.mem.eql(u8, source_summary, unit.dependency_summary.?);
+    }
+    return true;
+}
+
 // 查询目标列表中指定服务的运行状态，未找到返回 unknown。
 fn serviceActiveState(units: []const inventory.ServiceUnit, name: []const u8) inventory.ServiceActiveState {
     for (units) |unit| {
@@ -256,4 +328,94 @@ fn optionalStringEqual(left: ?[]const u8, right: ?[]const u8) bool {
     if (left == null and right == null) return true;
     if (left == null or right == null) return false;
     return std.mem.eql(u8, left.?, right.?);
+}
+
+// 判断目标中是否已有等价的 drop-in 摘要。
+fn hasEquivalentDropIn(drop_ins: []const inventory.SystemdDropIn, source: inventory.SystemdDropIn) bool {
+    for (drop_ins) |drop_in| {
+        if (!std.mem.eql(u8, drop_in.unit, source.unit)) continue;
+        if (!std.mem.eql(u8, drop_in.path, source.path)) continue;
+        if (drop_in.size != source.size) continue;
+        if (drop_in.meaningful_lines != source.meaningful_lines) continue;
+        return true;
+    }
+    return false;
+}
+
+// 判断目标中是否已有等价的服务环境文件摘要。
+fn hasEquivalentEnvFile(files: []const inventory.ServiceEnvFile, source: inventory.ServiceEnvFile) bool {
+    for (files) |file| {
+        if (!std.mem.eql(u8, file.unit, source.unit)) continue;
+        if (!std.mem.eql(u8, file.path, source.path)) continue;
+        if (file.size != source.size) continue;
+        if (file.meaningful_lines != source.meaningful_lines) continue;
+        return true;
+    }
+    return false;
+}
+
+test "systemd plan reviews drop-ins env files and start status" {
+    var actions: std.ArrayList(plan.Action) = .empty;
+    defer freeTestActions(&actions);
+
+    var source_units = [_]inventory.ServiceUnit{.{
+        .name = "app.service",
+        .state = .enabled,
+        .active_state = .active,
+        .custom = false,
+    }};
+    var target_units = [_]inventory.ServiceUnit{.{
+        .name = "app.service",
+        .state = .enabled,
+        .active_state = .inactive,
+        .custom = false,
+    }};
+    var source_dropins = [_]inventory.SystemdDropIn{.{
+        .unit = "app.service",
+        .path = "/etc/systemd/system/app.service.d/override.conf",
+        .size = 42,
+        .meaningful_lines = 2,
+    }};
+    var source_env = [_]inventory.ServiceEnvFile{.{
+        .unit = "app.service",
+        .path = "/etc/default/app",
+        .size = 12,
+        .meaningful_lines = 1,
+    }};
+
+    try appendActions(std.testing.allocator, &actions, .{
+        .init_system = "systemd",
+        .units = source_units[0..],
+        .drop_ins = source_dropins[0..],
+        .env_files = source_env[0..],
+    }, .{
+        .init_system = "systemd",
+        .units = target_units[0..],
+    });
+
+    try std.testing.expect(hasTestAction(actions.items, "services/review-start/app.service"));
+    try std.testing.expect(hasTestAction(actions.items, "services/check-status/app.service"));
+    try std.testing.expect(hasTestAction(actions.items, "services/review-drop-in//etc/systemd/system/app.service.d/override.conf"));
+    try std.testing.expect(hasTestAction(actions.items, "services/review-env//etc/default/app"));
+}
+
+// 测试辅助：释放 action 列表。
+fn freeTestActions(actions: *std.ArrayList(plan.Action)) void {
+    for (actions.items) |action| {
+        std.testing.allocator.free(action.id);
+        std.testing.allocator.free(action.subject);
+        if (action.home) |home| std.testing.allocator.free(home);
+        if (action.shell) |shell| std.testing.allocator.free(shell);
+        if (action.owner) |owner| std.testing.allocator.free(owner);
+        std.testing.allocator.free(action.description);
+    }
+    actions.deinit(std.testing.allocator);
+}
+
+// 测试辅助：判断 action id 是否存在。
+fn hasTestAction(actions: []const plan.Action, id: []const u8) bool {
+    for (actions) |action| {
+        if (std.mem.eql(u8, action.id, id)) return true;
+    }
+    return false;
 }

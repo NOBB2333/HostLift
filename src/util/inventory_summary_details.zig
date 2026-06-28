@@ -29,6 +29,7 @@ pub fn writeDetails(writer: anytype, value: inventory.Inventory) !void {
     try runtime.writeProjectSummary(writer, modules.projects, modules.docker);
     try runtime.writeProcessSummary(writer, modules.processes);
     try runtime.writeNetworkSummary(writer, modules.network);
+    try runtime.writeResourceSummary(writer, modules.resources);
     try runtime.writeDockerSummary(writer, modules.docker);
     try runtime.writeStorageSummary(writer, modules.storage);
     try system.writeFirewallSummary(writer, modules.firewall);

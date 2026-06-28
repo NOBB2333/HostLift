@@ -77,6 +77,7 @@ test {
     _ = @import("inventory/schema_parts/configs.zig");
     _ = @import("inventory/schema_parts/host.zig");
     _ = @import("inventory/schema_parts/packages.zig");
+    _ = @import("inventory/schema_parts/resources.zig");
     _ = @import("inventory/schema_parts/runtime.zig");
     _ = @import("inventory/schema_parts/services.zig");
     _ = @import("inventory/schema_parts/users.zig");
@@ -86,6 +87,7 @@ test {
     _ = @import("inventory/home_user.zig");
     _ = @import("inventory/package_manager.zig");
     _ = @import("inventory/platform.zig");
+    _ = @import("inventory/resources.zig");
     _ = @import("inventory/scan_filter.zig");
     _ = @import("inventory/scan_runner.zig");
     _ = @import("inventory/scanner.zig");
@@ -118,8 +120,10 @@ test {
     _ = @import("plan/modules/cron.zig");
     _ = @import("plan/modules/firewall.zig");
     _ = @import("plan/modules/home_configs.zig");
+    _ = @import("plan/modules/network_review.zig");
     _ = @import("plan/modules/packages.zig");
     _ = @import("plan/modules/projects.zig");
+    _ = @import("plan/modules/resources.zig");
     _ = @import("plan/modules/services.zig");
     _ = @import("plan/modules/ssh.zig");
     _ = @import("plan/modules/users.zig");

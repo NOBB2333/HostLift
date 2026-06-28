@@ -12,6 +12,7 @@ const network_scanner = @import("../inventory/network.zig");
 const packages_scanner = @import("../inventory/packages.zig");
 const processes_scanner = @import("../inventory/processes.zig");
 const projects_scanner = @import("../inventory/projects.zig");
+const resources_scanner = @import("../inventory/resources.zig");
 const security_policy_scanner = @import("../inventory/security_policy.zig");
 const services_scanner = @import("../inventory/services.zig");
 const ssh_scanner = @import("../inventory/ssh.zig");
@@ -40,6 +41,7 @@ const scan_handlers = [_]ModuleHandler{
     .{ .name = .network, .scan = scanNetwork },
     .{ .name = .docker, .scan = scanDocker },
     .{ .name = .firewall, .scan = scanFirewall },
+    .{ .name = .resources, .scan = scanResources },
     .{ .name = .storage, .scan = scanStorage },
     .{ .name = .system_baseline, .scan = scanSystemBaseline },
     .{ .name = .security_policy, .scan = scanSecurityPolicy },
@@ -98,6 +100,9 @@ fn scanDocker(ctx: ScanContext) !void {
 }
 fn scanFirewall(ctx: ScanContext) !void {
     ctx.modules.firewall = try firewall_scanner.scan(ctx.io, ctx.allocator);
+}
+fn scanResources(ctx: ScanContext) !void {
+    ctx.modules.resources = try resources_scanner.scan(ctx.io, ctx.allocator, ctx.modules.*);
 }
 fn scanStorage(ctx: ScanContext) !void {
     ctx.modules.storage = try storage_scanner.scan(ctx.io, ctx.allocator);

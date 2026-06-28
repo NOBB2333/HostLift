@@ -51,8 +51,7 @@ fn preflightTransfer(
     transfer_plan: remote_schema.TransferPlan,
     execution_options: @import("../remote/options.zig").ExecutionOptions,
 ) !void {
-    try remote_preflight.runCheck(io, allocator, remote_preflight.transferTargetCheck(transfer_plan), execution_options);
-    if (remote_preflight.transferSourceCheck(transfer_plan)) |check| try remote_preflight.runCheck(io, allocator, check, execution_options);
+    try remote_preflight.runTransferPreflight(io, allocator, transfer_plan, execution_options);
 }
 
 // 执行 scp 传输；单文件传输会在成功后做 SHA-256 校验。

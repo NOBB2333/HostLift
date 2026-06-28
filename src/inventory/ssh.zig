@@ -40,6 +40,7 @@ pub fn scan(io: std.Io, allocator: std.mem.Allocator) !schema.SshInventory {
         .sshd_config_present = probe.pathExists(io, "/etc/ssh/sshd_config"),
         .client_config_present = probe.pathExists(io, "/etc/ssh/ssh_config"),
         .sshd_config = try parseSshdConfigFile(io, allocator, "/etc/ssh/sshd_config"),
+        .host_keys = try scanHostKeys(io, allocator),
     };
 }
 
@@ -110,6 +111,51 @@ fn isInterestingSshdKey(key: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(key, candidate)) return true;
     }
     return false;
+}
+
+// 扫描 SSH host key 存在性和公钥指纹，不读取私钥内容。
+fn scanHostKeys(io: std.Io, allocator: std.mem.Allocator) ![]schema.SshHostKeyFact {
+    const key_types = [_][]const u8{ "rsa", "ecdsa", "ed25519" };
+    var facts: std.ArrayList(schema.SshHostKeyFact) = .empty;
+    errdefer freeHostKeys(allocator, facts.items);
+
+    for (key_types) |key_type| {
+        const private_path = try std.fmt.allocPrint(allocator, "/etc/ssh/ssh_host_{s}_key", .{key_type});
+        defer allocator.free(private_path);
+        const public_path = try std.fmt.allocPrint(allocator, "{s}.pub", .{private_path});
+        defer allocator.free(public_path);
+        const private_present = probe.pathExists(io, private_path);
+        const public_present = probe.pathExists(io, public_path);
+        if (!private_present and !public_present) continue;
+        try facts.append(allocator, .{
+            .key_type = try allocator.dupe(u8, key_type),
+            .private_path = try allocator.dupe(u8, private_path),
+            .public_path = try allocator.dupe(u8, public_path),
+            .private_present = private_present,
+            .public_present = public_present,
+            .fingerprint = try publicKeyFingerprint(io, allocator, public_path),
+        });
+    }
+
+    return facts.toOwnedSlice(allocator);
+}
+
+// 读取公钥指纹；缺 ssh-keygen 或公钥不可读时返回 null。
+fn publicKeyFingerprint(io: std.Io, allocator: std.mem.Allocator, public_path: []const u8) !?[]const u8 {
+    if (!probe.executableExists(io, allocator, "ssh-keygen")) return null;
+    const line = probe.runFirstLine(io, allocator, &.{ "ssh-keygen", "-l", "-f", public_path }) catch return null;
+    return line;
+}
+
+// 释放 SSH host key 摘要列表。
+fn freeHostKeys(allocator: std.mem.Allocator, facts: []schema.SshHostKeyFact) void {
+    for (facts) |fact| {
+        allocator.free(fact.key_type);
+        allocator.free(fact.private_path);
+        allocator.free(fact.public_path);
+        if (fact.fingerprint) |fingerprint| allocator.free(fingerprint);
+    }
+    allocator.free(facts);
 }
 
 test "sshd config parser extracts key authentication directives" {

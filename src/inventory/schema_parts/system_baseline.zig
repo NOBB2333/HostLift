@@ -17,6 +17,8 @@ pub const SystemPathKind = enum {
     nss,
     network,
     security,
+    system_env,
+    runtime_env,
     script_app,
 };
 
@@ -53,11 +55,11 @@ pub const SystemConfigFact = struct {
 
 // 脚本安装类型枚举。
 pub const ScriptInstallKind = enum {
-    mojo,
-    feishu_cli,
-    rustup,
-    nvm,
-    linuxbrew,
+    user_binary,
+    runtime_manager,
+    package_manager,
+    config_state,
+    install_root,
     unknown,
 };
 
@@ -67,6 +69,11 @@ pub const ScriptInstallCandidate = struct {
     path: []const u8,
     kind: ScriptInstallKind,
     present: bool,
+    evidence: ?[]const u8 = null,
+    source_hint: ?[]const u8 = null,
+    version_hint: ?[]const u8 = null,
+    checksum_hint: ?[]const u8 = null,
+    config_hint: ?[]const u8 = null,
     reinstall_hint: []const u8,
 };
 

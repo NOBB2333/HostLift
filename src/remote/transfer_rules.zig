@@ -20,7 +20,6 @@ pub fn validate(input: Input) !void {
     }
     if (input.partial and input.transport != .rsync) return error.PartialTransferRequiresRsync;
     if (input.resumable and input.transport != .rsync) return error.ResumeTransferRequiresRsync;
-    if (input.source_host != null and input.transport == .rsync) return error.RsyncRemoteToRemoteUnsupported;
     if (input.source_host != null and input.transport == .chunk) return error.ChunkRemoteToRemoteUnsupported;
     if (input.transport == .chunk and !input.recursive) return error.ChunkTransferRequiresRecursive;
 }
@@ -47,11 +46,8 @@ test "transfer rules require rsync for partial and resume" {
     try validate(.{ .transport = .rsync, .partial = true, .resumable = true });
 }
 
-test "transfer rules reject unsupported remote source transports" {
-    try std.testing.expectError(
-        error.RsyncRemoteToRemoteUnsupported,
-        validate(.{ .source_host = "root@192.0.2.11", .recursive = true, .transport = .rsync }),
-    );
+test "transfer rules allow remote source rsync and reject unsupported remote source transports" {
+    try validate(.{ .source_host = "root@192.0.2.11", .recursive = true, .transport = .rsync });
     try std.testing.expectError(
         error.ChunkRemoteToRemoteUnsupported,
         validate(.{ .source_host = "root@192.0.2.11", .recursive = true, .transport = .chunk }),

@@ -34,6 +34,16 @@ pub fn appendActions(
             .risk = .critical,
             .description = "Review container volume backup and restore plan before migration; HostLift only copies volume contents when explicitly selected",
         });
+        if (volumeMountedByRunningContainer(source.containers, volume)) {
+            try manual_common.appendManualStep(allocator, actions, .{
+                .id_prefix = "docker/stop-writers",
+                .name = action_name,
+                .subject = volume.name,
+                .module = .docker,
+                .risk = .critical,
+                .description = "Stop writers or take an application-consistent backup before copying this volume; a running container still references it",
+            });
+        }
         if (volume.mountpoint) |mountpoint| {
             try appendVolumeCopyAction(allocator, actions, volume.runtime, volume.name, mountpoint);
         }
@@ -49,7 +59,7 @@ pub fn appendActions(
             .subject = network.name,
             .module = .docker,
             .risk = .high,
-            .description = "Review container network definition before migration; HostLift does not recreate container networks automatically",
+            .description = "Recreate container network plan manually before starting containers; review driver, subnet, gateway and labels because HostLift does not auto-apply networks",
         });
     }
     for (source.images) |image| {
@@ -86,7 +96,15 @@ pub fn appendActions(
             .subject = container.image,
             .module = .docker,
             .risk = .high,
-            .description = "Review running container state before migration; HostLift does not live-migrate containers",
+            .description = "Check container recreation and post-migration status; prefer Compose or explicit run command review because HostLift does not live-migrate containers",
+        });
+        try manual_common.appendManualStep(allocator, actions, .{
+            .id_prefix = "docker/check-container",
+            .name = action_name,
+            .subject = container.name,
+            .module = .docker,
+            .risk = .high,
+            .description = "Verify container health, exposed ports and recent logs after migration",
         });
     }
     if (source.truncated) {
@@ -158,6 +176,30 @@ fn appendVolumeCopyAction(
     });
 }
 
+fn volumeMountedByRunningContainer(containers: []const inventory.DockerContainer, volume: inventory.ContainerVolume) bool {
+    for (containers) |container| {
+        if (container.runtime != volume.runtime) continue;
+        const mounts = container.mounts orelse continue;
+        if (mountsContainVolume(mounts, volume)) return true;
+    }
+    return false;
+}
+
+fn mountsContainVolume(mounts: []const u8, volume: inventory.ContainerVolume) bool {
+    var entries = std.mem.splitScalar(u8, mounts, ';');
+    while (entries.next()) |entry| {
+        if (entry.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, entry, '=');
+        const source = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        if (std.mem.eql(u8, source, volume.name)) return true;
+        if (volume.mountpoint) |mountpoint| {
+            if (std.mem.eql(u8, source, mountpoint)) return true;
+        }
+    }
+    return false;
+}
+
 // 查找 Compose 文件所在项目根目录。
 fn findComposeFile(files: []const inventory.ComposeFile, project_root: []const u8) ?inventory.ComposeFile {
     for (files) |file| {
@@ -185,4 +227,17 @@ fn isDefaultNetwork(name: []const u8) bool {
 fn runtimeQualifiedName(allocator: std.mem.Allocator, runtime: inventory.ContainerRuntimeKind, name: []const u8) ![]const u8 {
     if (runtime == .docker) return allocator.dupe(u8, name);
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ @tagName(runtime), name });
+}
+
+test "docker volume mount matching uses structured mount source" {
+    const volume = inventory.ContainerVolume{
+        .runtime = .docker,
+        .name = "db",
+        .driver = "local",
+        .mountpoint = "/var/lib/docker/volumes/db/_data",
+    };
+    try std.testing.expect(mountsContainVolume("db=/var/lib/postgresql/data;", volume));
+    try std.testing.expect(mountsContainVolume("/var/lib/docker/volumes/db/_data=/data;", volume));
+    try std.testing.expect(!mountsContainVolume("dbdata=/data;", volume));
+    try std.testing.expect(!mountsContainVolume("prefix-db=/data;", volume));
 }

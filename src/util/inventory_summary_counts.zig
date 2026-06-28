@@ -121,6 +121,32 @@ pub fn countPresentDataPaths(paths: []const inventory.DataPath) usize {
     return count;
 }
 
+// 资源统计汇总：可复制、需审查、默认排除和敏感资源数量。
+pub const ResourceCounts = struct {
+    copy: usize = 0,
+    review: usize = 0,
+    exclude: usize = 0,
+    sensitive: usize = 0,
+};
+
+// 统计整机资源地图中的默认动作和敏感资源数量。
+pub fn countResources(resources: []const inventory.ResourceRef) ResourceCounts {
+    var result: ResourceCounts = .{};
+    for (resources) |resource| {
+        if (!resource.present) continue;
+        switch (resource.default_action) {
+            .copy => result.copy += 1,
+            .review => result.review += 1,
+            .exclude => result.exclude += 1,
+        }
+        switch (resource.sensitivity) {
+            .sensitive, .secret => result.sensitive += 1,
+            .normal, .ephemeral => {},
+        }
+    }
+    return result;
+}
+
 // 统计可用的容器运行时数量。
 pub fn countAvailableContainerRuntimes(runtimes: []const inventory.ContainerRuntime) usize {
     var count: usize = 0;

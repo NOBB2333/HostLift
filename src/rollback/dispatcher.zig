@@ -49,6 +49,7 @@ pub fn moduleNameForActionId(action_id: []const u8) ?plan_schema.ModuleName {
     if (std.mem.eql(u8, prefix, "appdata")) return .appdata;
     if (std.mem.eql(u8, prefix, "projects")) return .projects;
     if (std.mem.eql(u8, prefix, "docker")) return .docker;
+    if (std.mem.eql(u8, prefix, "resources")) return .resources;
     if (std.mem.eql(u8, prefix, "firewall")) return .firewall;
     return null;
 }
@@ -63,6 +64,11 @@ fn verifyEntryRestored(
     stdout: anytype,
 ) !void {
     if (entry.original_path.len > 0) {
+        if (std.mem.eql(u8, entry.action_type, "delete_created_path")) {
+            if (try remote_exec.pathExistsWithOptions(io, allocator, host, entry.original_path, execution_options)) return error.RollbackVerifyOriginalMissing;
+            try stdout.print("  verify rollback {s}: created path removed {s}\n", .{ entry.action_id, entry.original_path });
+            return;
+        }
         if (!try remote_exec.pathExistsWithOptions(io, allocator, host, entry.original_path, execution_options)) return error.RollbackVerifyOriginalMissing;
         try stdout.print("  verify rollback {s}: restored path exists {s}\n", .{ entry.action_id, entry.original_path });
         return;

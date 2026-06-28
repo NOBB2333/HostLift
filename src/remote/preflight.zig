@@ -29,6 +29,10 @@ pub fn transferTargetCheck(transfer_plan: schema.TransferPlan) Check {
         .host = transfer_plan.host,
         .commands = if (transfer_plan.transport == .chunk)
             &.{ "mkdir", "rsync", "find", "stat", "sha256sum" }
+        else if (transfer_plan.transport == .rsync and transfer_plan.verify_checksum)
+            &.{ "rsync", "sha256sum" }
+        else if (transfer_plan.transport == .rsync)
+            &.{"rsync"}
         else if (transfer_plan.verify_checksum)
             &.{"sha256sum"}
         else
@@ -41,7 +45,11 @@ pub fn transferSourceCheck(transfer_plan: schema.TransferPlan) ?Check {
     const source_host = transfer_plan.source_host orelse return null;
     return .{
         .host = source_host,
-        .commands = if (transfer_plan.verify_checksum)
+        .commands = if (transfer_plan.transport == .rsync and transfer_plan.verify_checksum)
+            &.{ "rsync", "ssh", "sha256sum" }
+        else if (transfer_plan.transport == .rsync)
+            &.{ "rsync", "ssh" }
+        else if (transfer_plan.verify_checksum)
             &.{"sha256sum"}
         else
             &.{},
@@ -71,6 +79,39 @@ pub fn runCheck(
     for (check.any_commands) |group| {
         if (!try anyCommandExists(io, allocator, check.host, group, options)) return error.RemoteDependencyMissing;
     }
+}
+
+// 执行完整传输预检，覆盖目标依赖、远程源依赖和 source-host rsync 的源到目标 SSH 连通性。
+pub fn runTransferPreflight(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    transfer_plan: schema.TransferPlan,
+    options: options_mod.ExecutionOptions,
+) !void {
+    try runCheck(io, allocator, transferTargetCheck(transfer_plan), options);
+    if (transferSourceCheck(transfer_plan)) |check| try runCheck(io, allocator, check, options);
+    try runRemoteSourceTargetSshCheck(io, allocator, transfer_plan, options);
+}
+
+fn runRemoteSourceTargetSshCheck(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    transfer_plan: schema.TransferPlan,
+    options: options_mod.ExecutionOptions,
+) !void {
+    const source_host = transfer_plan.source_host orelse return;
+    if (!requiresRemoteSourceTargetSshCheck(transfer_plan)) return;
+    try validation.validateHost(source_host);
+    try validation.validateHost(transfer_plan.host);
+    const connect_timeout = try std.fmt.allocPrint(allocator, "ConnectTimeout={d}", .{transfer_plan.timeout_seconds});
+    defer allocator.free(connect_timeout);
+    var argv = [_][]const u8{ "ssh", "-o", "BatchMode=yes", "-o", connect_timeout, transfer_plan.host, "--", "true" };
+    const ok = try probe.commandSucceededWithOptions(io, allocator, source_host, argv[0..], options);
+    if (!ok) return error.RemoteSourceTargetSshUnavailable;
+}
+
+fn requiresRemoteSourceTargetSshCheck(transfer_plan: schema.TransferPlan) bool {
+    return transfer_plan.source_host != null and transfer_plan.transport == .rsync;
 }
 
 // 检查一组替代命令中是否有任一存在。
@@ -131,6 +172,55 @@ test "transfer preflight requires chunk target commands" {
     try std.testing.expectEqualStrings("sha256sum", check.commands[4]);
 }
 
+test "transfer preflight requires rsync on target and remote source" {
+    const transfer_plan = schema.TransferPlan{
+        .schema_version = schema.transfer_plan_schema_version,
+        .source_host = "root@192.0.2.11",
+        .host = "root@192.0.2.10",
+        .source_path = "/srv/app",
+        .target_path = "/srv/app",
+        .recursive = true,
+        .preserve_metadata = true,
+        .verify_checksum = false,
+        .transport = .rsync,
+        .risk = .high,
+        .requires_approval = true,
+    };
+
+    const target_check = transferTargetCheck(transfer_plan);
+    try std.testing.expectEqualStrings("root@192.0.2.10", target_check.host);
+    try std.testing.expectEqual(@as(usize, 1), target_check.commands.len);
+    try std.testing.expectEqualStrings("rsync", target_check.commands[0]);
+
+    const source_check = transferSourceCheck(transfer_plan).?;
+    try std.testing.expectEqualStrings("root@192.0.2.11", source_check.host);
+    try std.testing.expectEqual(@as(usize, 2), source_check.commands.len);
+    try std.testing.expectEqualStrings("rsync", source_check.commands[0]);
+    try std.testing.expectEqualStrings("ssh", source_check.commands[1]);
+}
+
+test "remote source target ssh preflight only applies to rsync source-host plans" {
+    var transfer_plan = schema.TransferPlan{
+        .schema_version = schema.transfer_plan_schema_version,
+        .source_host = "root@192.0.2.11",
+        .host = "root@192.0.2.10",
+        .source_path = "/srv/app",
+        .target_path = "/srv/app",
+        .recursive = true,
+        .preserve_metadata = true,
+        .verify_checksum = false,
+        .transport = .scp,
+        .risk = .high,
+        .requires_approval = true,
+    };
+
+    try std.testing.expect(!requiresRemoteSourceTargetSshCheck(transfer_plan));
+    transfer_plan.transport = .rsync;
+    try std.testing.expect(requiresRemoteSourceTargetSshCheck(transfer_plan));
+    transfer_plan.source_host = null;
+    try std.testing.expect(!requiresRemoteSourceTargetSshCheck(transfer_plan));
+}
+
 test "remote command preflight checks argv entrypoint" {
     var command_argv = [_][]const u8{ "systemctl", "restart", "nginx" };
     const command_plan = schema.CommandPlan{
@@ -150,7 +240,7 @@ test "remote command preflight checks argv entrypoint" {
 
 test "preflight check can express alternative command providers" {
     const alternatives = [_][]const u8{ "chkconfig", "update-rc.d" };
-    const groups = [_][]const []const u8{ alternatives[0..] };
+    const groups = [_][]const []const u8{alternatives[0..]};
     const check = Check{
         .host = "root@192.0.2.10",
         .commands = &.{"command"},

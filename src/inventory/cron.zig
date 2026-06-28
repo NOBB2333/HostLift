@@ -13,10 +13,17 @@ pub fn scan(io: std.Io, allocator: std.mem.Allocator) !schema.CronInventory {
         entries.deinit(allocator);
     }
 
-    try appendCronFile(io, allocator, &entries, "/etc/crontab", null);
-    try appendCronDir(io, allocator, &entries, "/etc/cron.d", null);
-    try appendCronSpoolDir(io, allocator, &entries, "/var/spool/cron/crontabs");
-    try appendCronSpoolDir(io, allocator, &entries, "/var/spool/cron");
+    try appendCronFile(io, allocator, &entries, "/etc/crontab", null, .cron);
+    try appendCronFile(io, allocator, &entries, "/etc/anacrontab", null, .anacron);
+    try appendCronDir(io, allocator, &entries, "/etc/cron.d", null, .cron);
+    try appendCronDir(io, allocator, &entries, "/etc/cron.hourly", null, .periodic_dir);
+    try appendCronDir(io, allocator, &entries, "/etc/cron.daily", null, .periodic_dir);
+    try appendCronDir(io, allocator, &entries, "/etc/cron.weekly", null, .periodic_dir);
+    try appendCronDir(io, allocator, &entries, "/etc/cron.monthly", null, .periodic_dir);
+    try appendCronSpoolDir(io, allocator, &entries, "/var/spool/cron/crontabs", .cron);
+    try appendCronSpoolDir(io, allocator, &entries, "/var/spool/cron", .cron);
+    try appendCronSpoolDir(io, allocator, &entries, "/var/spool/at", .at_spool);
+    try appendCronSpoolDir(io, allocator, &entries, "/var/spool/cron/atjobs", .at_spool);
 
     return .{ .entries = try entries.toOwnedSlice(allocator) };
 }
@@ -28,6 +35,7 @@ fn appendCronDir(
     entries: *std.ArrayList(schema.CronEntry),
     path: []const u8,
     owner: ?[]const u8,
+    kind: schema.CronSourceKind,
 ) !void {
     var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -37,7 +45,7 @@ fn appendCronDir(
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         const child_path = try std.fs.path.join(allocator, &.{ path, entry.name });
         defer allocator.free(child_path);
-        try appendCronFile(io, allocator, entries, child_path, owner);
+        try appendCronFile(io, allocator, entries, child_path, owner, kind);
     }
 }
 
@@ -47,6 +55,7 @@ fn appendCronSpoolDir(
     allocator: std.mem.Allocator,
     entries: *std.ArrayList(schema.CronEntry),
     path: []const u8,
+    kind: schema.CronSourceKind,
 ) !void {
     var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -56,7 +65,7 @@ fn appendCronSpoolDir(
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         const child_path = try std.fs.path.join(allocator, &.{ path, entry.name });
         defer allocator.free(child_path);
-        try appendCronFile(io, allocator, entries, child_path, entry.name);
+        try appendCronFile(io, allocator, entries, child_path, entry.name, kind);
     }
 }
 
@@ -67,6 +76,7 @@ fn appendCronFile(
     entries: *std.ArrayList(schema.CronEntry),
     path: []const u8,
     owner: ?[]const u8,
+    kind: schema.CronSourceKind,
 ) !void {
     const contents = probe.readWholeFile(io, allocator, path) catch return;
     defer allocator.free(contents);
@@ -78,5 +88,6 @@ fn appendCronFile(
         .source = try allocator.dupe(u8, path),
         .owner = if (owner) |value| try allocator.dupe(u8, value) else null,
         .line_count = line_count,
+        .kind = kind,
     });
 }

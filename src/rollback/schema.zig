@@ -22,6 +22,14 @@ pub fn validateEntry(entry: Entry) !void {
     try validateToken(entry.action_id);
     try validateToken(entry.action_type);
 
+    if (std.mem.eql(u8, entry.action_type, "delete_created_path")) {
+        try remote_planner.validatePath(entry.original_path);
+        if (!std.mem.startsWith(u8, entry.original_path, "/")) return error.InvalidRollbackManifestEntry;
+        if (entry.original_path.len <= 1 or entry.backup_path.len != 0 or entry.subject.len == 0) return error.InvalidRollbackManifestEntry;
+        try validateCreatedPathBaseline(entry.subject);
+        return;
+    }
+
     if (isFileBacked(entry)) {
         if (entry.subject.len > 0) try validateToken(entry.subject);
         try remote_planner.validatePath(entry.original_path);
@@ -48,6 +56,20 @@ pub fn validateEntry(entry: Entry) !void {
     }
 
     return error.InvalidRollbackManifestEntry;
+}
+
+fn validateCreatedPathBaseline(value: []const u8) !void {
+    if (!std.mem.startsWith(u8, value, "stat:v1:")) return error.InvalidRollbackManifestEntry;
+    var fields = std.mem.splitScalar(u8, value["stat:v1:".len..], ':');
+    var seen: usize = 0;
+    while (fields.next()) |field| {
+        if (field.len == 0) return error.InvalidRollbackManifestEntry;
+        for (field) |byte| {
+            if (byte < '0' or byte > '9') return error.InvalidRollbackManifestEntry;
+        }
+        seen += 1;
+    }
+    if (seen != 3) return error.InvalidRollbackManifestEntry;
 }
 
 // 判断 rollback entry 是否由文件备份支撑。

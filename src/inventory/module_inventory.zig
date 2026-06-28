@@ -2,6 +2,7 @@ const std = @import("std");
 const acl_schema = @import("schema_parts/acl.zig");
 const config_schema = @import("schema_parts/configs.zig");
 const package_schema = @import("schema_parts/packages.zig");
+const resource_schema = @import("schema_parts/resources.zig");
 const runtime_schema = @import("schema_parts/runtime.zig");
 const security_policy_schema = @import("schema_parts/security_policy.zig");
 const service_schema = @import("schema_parts/services.zig");
@@ -40,6 +41,7 @@ pub const ModuleInventory = struct {
         .truncated = false,
     },
     firewall: runtime_schema.FirewallInventory = .{ .backend = .unknown, .configs = &.{} },
+    resources: resource_schema.ResourceInventory = .{},
     storage: storage_schema.StorageInventory = .{ .fstab_entries = &.{}, .mounts = &.{}, .truncated = false },
     system_baseline: system_baseline_schema.SystemBaselineInventory = .{},
     security_policy: security_policy_schema.SecurityPolicyInventory = .{},
@@ -55,6 +57,8 @@ pub fn emptyModules() ModuleInventory {
         .services = .{
             .init_system = "unknown",
             .units = &.{},
+            .drop_ins = &.{},
+            .env_files = &.{},
             .timers = &.{},
             .sockets = &.{},
             .user_units = &.{},
@@ -74,6 +78,7 @@ pub fn emptyModules() ModuleInventory {
             .sshd_config_present = false,
             .client_config_present = false,
             .sshd_config = &.{},
+            .host_keys = &.{},
         },
         .sudoers = .{
             .entries = &.{},
@@ -124,6 +129,7 @@ pub fn emptyModules() ModuleInventory {
             .backend = .unknown,
             .configs = &.{},
         },
+        .resources = .{},
         .storage = .{
             .fstab_entries = &.{},
             .mounts = &.{},
@@ -144,8 +150,19 @@ pub fn deinitModules(allocator: std.mem.Allocator, modules: ModuleInventory) voi
     for (modules.services.units) |unit| {
         allocator.free(unit.name);
         if (unit.path) |path| allocator.free(path);
+        if (unit.dependency_summary) |summary| allocator.free(summary);
     }
     allocator.free(modules.services.units);
+    for (modules.services.drop_ins) |drop_in| {
+        allocator.free(drop_in.unit);
+        allocator.free(drop_in.path);
+    }
+    allocator.free(modules.services.drop_ins);
+    for (modules.services.env_files) |env_file| {
+        allocator.free(env_file.unit);
+        allocator.free(env_file.path);
+    }
+    allocator.free(modules.services.env_files);
     for (modules.services.timers) |timer| {
         allocator.free(timer.name);
         allocator.free(timer.activates);
@@ -206,6 +223,13 @@ pub fn deinitModules(allocator: std.mem.Allocator, modules: ModuleInventory) voi
         allocator.free(fact.value);
     }
     allocator.free(modules.ssh.sshd_config);
+    for (modules.ssh.host_keys) |host_key| {
+        allocator.free(host_key.key_type);
+        allocator.free(host_key.private_path);
+        allocator.free(host_key.public_path);
+        if (host_key.fingerprint) |fingerprint| allocator.free(fingerprint);
+    }
+    allocator.free(modules.ssh.host_keys);
     for (modules.sudoers.entries) |entry| allocator.free(entry.path);
     allocator.free(modules.sudoers.entries);
     for (modules.acl.paths) |path| allocator.free(path.path);
@@ -230,7 +254,13 @@ pub fn deinitModules(allocator: std.mem.Allocator, modules: ModuleInventory) voi
         allocator.free(config.relative_path);
     }
     allocator.free(modules.home_configs.configs);
-    for (modules.appdata.paths) |path| allocator.free(path.path);
+    for (modules.appdata.paths) |path| {
+        allocator.free(path.path);
+        if (path.engine_hint) |hint| allocator.free(hint);
+        if (path.dump_hint) |hint| allocator.free(hint);
+        if (path.restore_hint) |hint| allocator.free(hint);
+        if (path.consistency_hint) |hint| allocator.free(hint);
+    }
     allocator.free(modules.appdata.paths);
     for (modules.projects.projects) |project| {
         allocator.free(project.root);
@@ -254,6 +284,7 @@ pub fn deinitModules(allocator: std.mem.Allocator, modules: ModuleInventory) voi
         allocator.free(container.image);
         allocator.free(container.status);
         allocator.free(container.ports);
+        if (container.mounts) |mounts| allocator.free(mounts);
         if (container.compose_project) |value| allocator.free(value);
         if (container.compose_service) |value| allocator.free(value);
         if (container.compose_workdir) |value| allocator.free(value);
@@ -285,6 +316,21 @@ pub fn deinitModules(allocator: std.mem.Allocator, modules: ModuleInventory) voi
     allocator.free(modules.docker.compose_files);
     for (modules.firewall.configs) |config| allocator.free(config.path);
     allocator.free(modules.firewall.configs);
+    for (modules.resources.resources) |resource| {
+        allocator.free(resource.path);
+        if (resource.owner) |owner| allocator.free(owner);
+        if (resource.owner_group) |owner_group| allocator.free(owner_group);
+        if (resource.mode) |mode| allocator.free(mode);
+        if (resource.mtime_unix) |mtime| allocator.free(mtime);
+        if (resource.package_owner) |owner| allocator.free(owner);
+        for (resource.evidence) |evidence| allocator.free(evidence);
+        allocator.free(resource.evidence);
+        if (resource.sha256) |sha256| allocator.free(sha256);
+        if (resource.file_type) |file_type| allocator.free(file_type);
+        if (resource.dynamic_link_summary) |summary| allocator.free(summary);
+        if (resource.security_summary) |summary| allocator.free(summary);
+    }
+    allocator.free(modules.resources.resources);
     for (modules.storage.fstab_entries) |entry| {
         allocator.free(entry.device);
         allocator.free(entry.mount_point);
@@ -317,6 +363,11 @@ pub fn deinitModules(allocator: std.mem.Allocator, modules: ModuleInventory) voi
     for (modules.system_baseline.script_apps) |app| {
         allocator.free(app.name);
         allocator.free(app.path);
+        if (app.evidence) |evidence| allocator.free(evidence);
+        if (app.source_hint) |hint| allocator.free(hint);
+        if (app.version_hint) |hint| allocator.free(hint);
+        if (app.checksum_hint) |hint| allocator.free(hint);
+        if (app.config_hint) |hint| allocator.free(hint);
         allocator.free(app.reinstall_hint);
     }
     allocator.free(modules.system_baseline.script_apps);

@@ -29,6 +29,23 @@ pub const ServiceUnit = struct {
     active_state: ServiceActiveState = .unknown,
     custom: bool,
     path: ?[]const u8 = null,
+    dependency_summary: ?[]const u8 = null,
+};
+
+// systemd drop-in 配置片段记录。
+pub const SystemdDropIn = struct {
+    unit: []const u8,
+    path: []const u8,
+    size: u64 = 0,
+    meaningful_lines: u32 = 0,
+};
+
+// 服务关联环境文件记录。
+pub const ServiceEnvFile = struct {
+    unit: []const u8,
+    path: []const u8,
+    size: u64 = 0,
+    meaningful_lines: u32 = 0,
 };
 
 // systemd 定时器记录。
@@ -101,6 +118,8 @@ pub const OpenRcService = struct {
 pub const ServiceInventory = struct {
     init_system: []const u8,
     units: []ServiceUnit,
+    drop_ins: []SystemdDropIn = &.{},
+    env_files: []ServiceEnvFile = &.{},
     timers: []SystemdTimer = &.{},
     sockets: []SystemdSocket = &.{},
     user_units: []UserSystemdUnit = &.{},
@@ -114,6 +133,15 @@ pub const CronEntry = struct {
     source: []const u8,
     owner: ?[]const u8,
     line_count: u32,
+    kind: CronSourceKind = .cron,
+};
+
+// 定时任务来源类型，区分普通 cron、anacron 和一次性 at 任务线索。
+pub const CronSourceKind = enum {
+    cron,
+    anacron,
+    periodic_dir,
+    at_spool,
 };
 
 // 定时任务清单汇总。

@@ -152,7 +152,7 @@ src/main.zig
   -> audit / rollback
 ```
 
-最核心的设计判断是：HostLift 不把迁移写成一批临时 shell 脚本，而是把每一步都变成结构化契约。用户、AI、工单系统和测试都应该读写这些契约，而不是依赖某个临时输出文本。
+最核心的设计判断是：HostLift 不把迁移写成一批临时 shell 脚本，而是把每一步都变成结构化契约。用户、AI、脚本和测试都应该读写这些契约，而不是依赖某个临时输出文本。
 
 当前 README 面向使用者，说明如何扫描、规划、传输、远程执行、审批、审计和回滚；本文面向开发者，说明这些命令在代码里如何分层实现，以及新增能力时应该改哪些文件。
 
@@ -353,7 +353,7 @@ src/rollback/*  rollback manifest、恢复分发和后置校验
 | Inventory | 描述一台机器有什么 | `src/inventory/schema.zig`、`src/inventory/module_inventory.zig`、`src/inventory/schema_parts/*.zig` |
 | MigrationPlan | 描述应该执行哪些迁移动作 | `src/plan/schema.zig`、`src/plan/builder.zig`、`src/plan/modules/*.zig` |
 | ActionPolicy | 描述执行前允许或拒绝哪些动作、目标和本地 operator | `src/policy/*.zig` |
-| ApprovalReceipt | 描述本地审批系统导出的执行凭证 | `src/policy/approval_receipt.zig`、`src/cli/approval_receipt.zig` |
+| ApprovalReceipt | 描述本地审批凭证及其 ticket、operator、host、plan hash 和 purpose 绑定 | `src/policy/approval_receipt.zig`、`src/cli/approval_receipt.zig` |
 | ModuleHandler | 描述模块支持哪些生命周期和 apply 远程依赖 | `src/modules/handler.zig`、`src/modules/scan_registry.zig`、`src/modules/plan_registry.zig`、`src/modules/apply_support.zig` |
 | RemoteOptions | 描述远程执行超时、重试、identity file 和 credential provider | `src/remote/options.zig` |
 | TransferPlan | 描述一次文件传输，包括 scp、rsync 和 chunk 计划契约 | `src/remote/transfer_plan.zig`、`src/transfer/*.zig`、`src/transport/*.zig` |
@@ -465,7 +465,7 @@ src/main.zig
 HostLift 没有先做中心服务和数据库，而是先把关键状态落到文件，是出于三个考虑：
 
 1. Linux 迁移通常发生在一次性项目或变更窗口内，文件比常驻服务更容易部署。
-2. inventory、plan、audit 和 rollback 都需要被人工、AI、工单系统和审计系统独立读取。
+2. inventory、plan、audit 和 rollback 都需要被人工、AI、脚本和测试独立读取。
 3. 文件型协议天然支持 dry-run、离线审查、复盘和回滚。
 
 这些文件同时也是未来 API/TUI/control plane 的数据契约。即使以后增加服务端，服务端也应该复用这些 schema，而不是另起一套内部模型。
@@ -629,18 +629,9 @@ cli/apply
 
 其中 `remote/runner` 和 `transport/runner` 是真正启动子进程的位置。其它领域模块只构造结构化请求或调用 adapter，不直接散落 `ssh`、`scp`、`rsync` 拼接逻辑。
 
-### 3.2 兼容门面
+### 3.2 未发布阶段重构策略
 
-部分文件仍保留 facade 作用，例如：
-
-- `src/modules/registry.zig`
-- `src/remote/planner.zig`
-- `src/remote/exec.zig`
-- `src/audit/sink.zig`
-- `src/audit/log.zig`
-- `src/inventory/schema.zig`
-
-这些文件存在的目的，是让旧调用点和测试继续使用稳定导出，同时把新实现拆到更小的领域文件里。后续重构时应优先保持这些 facade 的公共导出稳定。
+HostLift 当前还没有正式发布，模块边界和 public 入口发生冲突时应直接重构调用点，不新增旧 API 兼容层。已有较薄的聚合入口只承担当前源码内部的分发职责，后续新增领域类型、action 或 provider 时应接入真实领域模块，而不是继续堆到聚合文件里。
 
 ### 3.3 目录职责表
 
@@ -689,7 +680,7 @@ CLI 解析
 
 这样拆分带来的好处是：
 
-- inventory 和 plan 可以离线保存，人工、AI、测试和工单系统都能复用。
+- inventory 和 plan 可以离线保存，人工、AI、测试和脚本都能复用。
 - policy、security、registry、preflight、audit 和 rollback 可以在所有模块之间共享。
 - SSH、scp、rsync、curl、logger 等外部命令只从 adapter 层出去，便于 fake remote 测试。
 - 高风险领域可以独立隔离，例如 firewall、credentials、audit sink 和 rollback。
@@ -704,9 +695,9 @@ CLI 解析
 - 文件里出现多个后端分支，例如 apt/dnf/pacman 或 nftables/ufw/firewalld，应拆 provider/backend。
 - 文件里既写 audit 又执行业务动作，应把 audit 事件适配拆出去。
 - 文件里既循环 manifest 又分发 rollback action，应把 dispatcher 拆出去。
-- 文件只是 facade 或兼容导出，可以保留较薄的入口，但不应该继续加入新领域类型。
+- 文件只是聚合入口时，应保持薄分发，不继续加入新领域类型；如果边界冲突，直接重构调用点。
 
-当前 `firewall/*`、`credentials/*`、`audit/*`、`rollback/*`、`remote/*`、`transport/*` 已经按这个方向拆分。`sudoers` 已先按 scan-only 模块拆出 `inventory/sudoers.zig` 和 `schema_parts/sudoers.zig`，ACL 已先按 scan-only 模块拆出 `inventory/acl.zig` 和 `schema_parts/acl.zig`，`storage` 已先按 scan-only 模块拆出 `inventory/storage.zig` 和 `schema_parts/storage.zig`，SELinux/AppArmor 已先按 scan-only 模块拆出 `inventory/security_policy.zig` 和 `schema_parts/security_policy.zig`。这些高风险模块现在按领域拆成独立 plan-only review 文件：`sudoers_review.zig`、`acl_review.zig`、`storage_review.zig`、`security_policy_review.zig` 和 `container_review.zig` 负责生成 `manual_step` 人工审查项，`manual_common.zig` 负责公共构造逻辑，`manual_review.zig` 只保留薄门面和聚合测试；它们都不提供自动 apply/rollback。Docker/Podman 已先在 `inventory/docker.zig` 和 `schema_parts/runtime.zig` 下扩展 scan-only 事实，`docker.zig` 只做聚合入口，runtime 检测、运行中容器、volume/network/image 元数据和 Compose 文件候选路径分别拆到 `docker_runtime.zig`、`docker_containers.zig`、`docker_resources.zig` 和 `docker_compose.zig`；资源记录带 runtime 字段，plan 层按 Docker/Podman 分开比对同名 volume、network、image 和 container。这些事实会通过 `container_review.zig` 生成容器人工审查项，缺失 volume 且能解析 mountpoint 时可生成高风险数据复制动作，但不自动重建 network 或运行中容器状态。后续继续扩展容器 apply 时，也应沿用同样边界。
+当前 `firewall/*`、`credentials/*`、`audit/*`、`rollback/*`、`remote/*`、`transport/*` 已经按这个方向拆分。`sudoers` 已先按 scan-only 模块拆出 `inventory/sudoers.zig` 和 `schema_parts/sudoers.zig`，ACL 已先按 scan-only 模块拆出 `inventory/acl.zig` 和 `schema_parts/acl.zig`，`storage` 已先按 scan-only 模块拆出 `inventory/storage.zig` 和 `schema_parts/storage.zig`，SELinux/AppArmor 已先按 scan-only 模块拆出 `inventory/security_policy.zig` 和 `schema_parts/security_policy.zig`。这些高风险模块现在按领域拆成独立 plan-only review 文件：`sudoers_review.zig`、`acl_review.zig`、`storage_review.zig`、`security_policy_review.zig` 和 `container_review.zig` 负责生成 `manual_step` 人工审查项，`manual_common.zig` 负责公共构造逻辑，`manual_review.zig` 只保留聚合测试；它们都不提供自动 apply/rollback。Docker/Podman 已先在 `inventory/docker.zig` 和 `schema_parts/runtime.zig` 下扩展 scan-only 事实，`docker.zig` 只做聚合入口，runtime 检测、运行中容器及 mount 摘要、volume/network/image 元数据和 Compose 文件候选路径分别拆到 `docker_runtime.zig`、`docker_containers.zig`、`docker_resources.zig` 和 `docker_compose.zig`；资源记录带 runtime 字段，plan 层按 Docker/Podman 分开比对同名 volume、network、image 和 container。这些事实会通过 `container_review.zig` 生成容器人工审查项，缺失 volume 且能解析 mountpoint 时可生成高风险数据复制动作；如果运行中容器 mount 摘要中的结构化 source token 精确引用该 volume 或 mountpoint，会先生成 `docker/stop-writers/<volume>`，缺失 network/container 会生成重建和健康检查提示，但不自动恢复运行态。后续继续扩展容器 apply 时，也应沿用同样边界。
 
 服务规划侧和执行侧都按 provider 继续拆分：`src/plan/modules/services.zig` 只保留聚合入口，systemd service/timer/socket、用户级 systemd、XDG autostart、SysV init 和 OpenRC 的规划规则分别拆到 `services_systemd.zig`、`services_user_systemd.zig`、`services_xdg.zig`、`services_sysv.zig` 和 `services_openrc.zig`。执行侧 `src/modules/handlers/services.zig` 只保留 services 模块的 apply/verify/rollback 分发和 systemd 轻量逻辑，用户级 systemd `runuser -- systemctl --user enable/is-enabled/disable` 已拆到 `src/modules/handlers/services_user_systemd.zig`，SysV provider 探测、`chkconfig`/`update-rc.d` 命令选择、runlevel verify 和 rollback 后置验证已拆到 `src/modules/handlers/services_sysv.zig`；OpenRC `rc-update add/del`、runlevel 链接 verify 和 rollback 后置验证已拆到 `src/modules/handlers/services_openrc.zig`。rollback dispatcher 不再复制用户级 systemd、SysV 和 OpenRC 验证逻辑，而是复用同一组 helper，避免 plan/apply verify 和 rollback verify 分叉。
 
@@ -736,11 +727,11 @@ CLI 解析
 
 这样可以把安全检查集中在少数边界里，避免每个模块自己实现一套远程调用。
 
-`src/remote/preflight.zig` 负责执行前远程依赖预检。当前 remote exec 会检查 argv[0] 对应命令；transfer 会在 approved 执行前按计划推导目标机和源机器需要的命令，例如 checksum 校验需要 `sha256sum`；approved apply 会通过 `src/apply/preflight.zig` 调用模块 handler 的 `applyRequirements`，按 action 类型和 apply options 声明目标机依赖，例如包安装需要对应包管理器和验证命令，systemd 动作需要 `systemctl`，用户/组动作需要 `useradd`、`groupadd`、`id` 或 `getent`，文件备份和权限修复需要 `mkdir`、`cp`、`chmod`、`chown`，防火墙 reload/recovery 会按 backend 和恢复窗口声明 `grep`、`nft`、`iptables-restore`、`ufw`、`firewall-cmd`、`systemd-run` 等。所有检查都通过结构化 `command -v <cmd>` argv 远程执行。缺失依赖时失败关闭，避免进入主体执行后才失败。
+`src/remote/preflight.zig` 负责执行前远程依赖预检。当前 remote exec 会检查 argv[0] 对应命令；transfer 会在 approved 执行前按计划推导目标机和源机器需要的命令，例如 checksum 校验需要 `sha256sum`，`source_host + rsync` 会要求目标机具备 `rsync`、源机具备 `rsync` 和 `ssh`，并从源机执行 BatchMode SSH 轻量探测目标机；approved apply 会通过 `src/apply/preflight.zig` 调用模块 handler 的 `applyRequirements`，按 action 类型和 apply options 声明目标机依赖，例如包安装需要对应包管理器和验证命令，systemd 动作需要 `systemctl`，用户/组动作需要 `useradd`、`groupadd`、`id` 或 `getent`，文件备份和权限修复需要 `mkdir`、`cp`、`chmod`、`chown`，防火墙 reload/recovery 会按 backend 和恢复窗口声明 `grep`、`nft`、`iptables-restore`、`ufw`、`firewall-cmd`、`systemd-run` 等。文件型 apply handler 构建 transfer plan 后还会复用 transfer source/target preflight，并在递归数据复制前用源端 `du`/`find` 和目标端 `df` 做实时容量与 inode 复核。所有检查都通过结构化 argv 远程执行。缺失依赖或容量不足时失败关闭，避免进入主体执行后才失败。
 
 ### 4.4 能力声明而不是默认支持
 
-`src/modules/scan_registry.zig`、`src/modules/plan_registry.zig` 和 `src/modules/apply_support.zig` 是能力声明表。模块能 scan，不代表能 apply；能 apply，也不代表能 rollback。`src/modules/registry.zig` 只保留旧调用入口的兼容导出。
+`src/modules/scan_registry.zig`、`src/modules/plan_registry.zig` 和 `src/modules/apply_support.zig` 是能力声明表。模块能 scan，不代表能 apply；能 apply，也不代表能 rollback。未发布阶段不保留旧模块别名；调用点应直接依赖当前能力声明表。
 
 未声明支持的生命周期和 action 应该 fail closed，不能静默跳过。
 
@@ -754,9 +745,9 @@ inventory、plan、policy、audit log 和 rollback manifest 都是文件。这�
 - 方便迁移失败后复盘。
 - 方便用普通日志系统或文本工具处理 JSONL 审计。
 
-### 4.6 可追加兼容
+### 4.6 Schema 演进策略
 
-JSON schema 应优先通过可选字段扩展，避免修改已有字段语义。审计校验代码已经兼容历史字段集，例如旧事件没有 `credential_source` 或 `policy_hash` 的情况。
+JSON schema 应优先通过可选字段扩展，避免修改已有字段语义。项目未发布前，如果字段语义冲突，优先一次性重构 schema、读写和测试，不新增临时兼容层。审计校验代码仍需要能解释已经生成的本地日志字段集，例如没有 `credential_source` 或 `policy_hash` 的历史日志。
 
 ### 4.7 失败关闭
 
@@ -860,10 +851,10 @@ hostlift scan --output source-inventory.json --summary --force
 - `src/inventory/dev_env_configs.zig`：系统和用户级开发配置路径扫描。
 - `src/inventory/dev_env_proxy.zig`：代理环境变量扫描。
 - `src/inventory/*.zig`：各领域探针。
-- `src/inventory/schema.zig`：inventory 兼容导出门面和顶层 `Inventory`。
+- `src/inventory/schema.zig`：inventory 顶层 `Inventory` 聚合入口。
 - `src/inventory/module_inventory.zig`：模块清单聚合类型、空模块 fixture 和模块内存释放。
 - `src/inventory/schema_parts/*.zig`：host、package、service、user、config、runtime 等领域类型。
-- `src/util/inventory_summary.zig`：inventory 摘要兼容入口。
+- `src/util/inventory_summary.zig`：inventory 摘要聚合入口。
 - `src/util/inventory_summary_overview.zig`：主机、包、服务、用户、运行时和防火墙概览。
 - `src/util/inventory_summary_details.zig`：摘要详情聚合。
 - `src/util/inventory_summary_system.zig`、`inventory_summary_dev.zig`、`inventory_summary_runtime.zig`：system/dev/runtime 详情章节。
@@ -874,7 +865,7 @@ scan 的实现重点是“事实采集”，不是“迁移建议”。例如监
 
 服务扫描分七类，代码上按 provider 拆成 `services_systemd.zig`、`services_user_units.zig`、`services_xdg.zig`、`services_sysv.zig` 和 `services_openrc.zig`，`services.zig` 只保留聚合逻辑：
 
-- systemd service：通过 `systemctl list-unit-files --type=service` 获取 unit 名称和 unit-file 启用状态，通过 `systemctl list-units --type=service --all` 获取 active/reloading/activating/inactive/failed 等运行态，并检查 `/etc/systemd/system/<unit>` 是否为自定义 unit。
+- systemd service：通过 `systemctl list-unit-files --type=service` 获取 unit 名称和 unit-file 启用状态，通过 `systemctl list-units --type=service --all` 获取 active/reloading/activating/inactive/failed 等运行态，并检查 `/etc/systemd/system/<unit>` 是否为自定义 unit；还会通过 `systemctl show` 记录 Requires/Wants/After/EnvironmentFiles/ExecStart 摘要，用于 plan 阶段生成依赖图审查项。
 - systemd timer：通过 `systemctl list-timers --all` 获取 timer、被激活 unit 和 schedule 摘要，通过 `systemctl list-unit-files --type=timer` 补充 enabled/static/disabled 状态，并检查自定义 timer 路径。
 - systemd socket：通过 `systemctl list-unit-files --type=socket` 获取 socket 名称和状态，通过 `systemctl list-sockets --all` 尽量补充被激活 unit，并检查自定义 socket 路径。
 - 用户级 systemd unit：从可登录用户和 root 的 `~/.config/systemd/user` 目录中只读枚举 `.service`、`.timer`、`.socket` 文件，记录用户、文件名、路径、类型和 `default.target.wants/<unit>` enabled 状态。
@@ -882,7 +873,7 @@ scan 的实现重点是“事实采集”，不是“迁移建议”。例如监
 - SysV init：只读枚举 `/etc/init.d` 脚本名和路径，再扫描 `/etc/rc*.d/S*` 链接推断是否启用和 runlevel 摘要。
 - OpenRC：检测 `/etc/runlevels` 后只读枚举 `/etc/init.d` service 名和路径，再扫描 `/etc/runlevels/*/<service>` 链接推断是否启用和 runlevel 摘要；runlevel 名会排序后写入 inventory，保证 plan 等价判断稳定。
 
-用户级 systemd unit、系统级 socket/timer、XDG autostart、SysV init 和 OpenRC 都不读取正文。这样可以发现 systemd service 运行态、定时启动、socket activation、用户会话自启动项、桌面登录自启动项、传统 runlevel 启动脚本和 OpenRC runlevel service，但避免把 `ExecStart`、环境变量、命令参数、`.desktop` 或 init 脚本正文中的敏感内容写入 inventory。plan 阶段会对源端 active/reloading/activating 而目标端不是 active-like 的 systemd service 生成 `services/review-runtime/<unit>` high-risk `manual_step`，提醒人工决定是否在目标机启动或重启服务；它不会自动生成 `systemctl start/restart`。plan 阶段还会对自定义且目标缺失的 systemd timer/socket 生成 `install_systemd_unit` 动作，对 enabled timer/socket 生成 `enable_systemd_unit` 动作；这两类动作复用现有 systemd unit 安装、`systemctl enable`、`systemctl is-enabled` verify 和 enable rollback。目标缺失的用户级 systemd unit 会生成 `copy_home_config` 文件型 action，并把 `owner` 设为对应用户；enabled 用户级 systemd unit 会生成 `enable_user_systemd_unit`，subject 使用 `<user>:<unit>`，执行侧由 `src/modules/handlers/services_user_systemd.zig` 统一处理，通过 `runuser -u <user> -- systemctl --user enable <unit>` 启用，通过 `runuser -u <user> -- systemctl --user is-enabled <unit>` 验证，rollback 通过同一用户上下文执行 `disable`，rollback 后置验证确认 `is-enabled` 失败。目标缺失的 XDG autostart 也会生成文件型 action：系统级 `.desktop` 走 `write_file`，用户级 `.desktop` 走 `copy_home_config`。目标缺失的 SysV/OpenRC `/etc/init.d` 脚本会生成 `write_file` 文件型 action，services handler 委托文件传输 handler 复用备份、传输、checksum/存在性 verify 和文件型 rollback。SysV init 会按 runlevel diff 生成 `enable_sysv_init` 和 `disable_sysv_init`：subject 使用 `<service>:2,3,5`，preflight 用 provider group 表达 `chkconfig` 或 `update-rc.d` 至少存在一个，执行侧由 `src/modules/handlers/services_sysv.zig` 统一探测 provider，优先选择 `chkconfig`，否则选择 `update-rc.d`；`chkconfig` provider 把逗号 runlevel 规范化成 `chkconfig --level 235 <service> on/off`，并通过 `chkconfig --list <service>` 验证；`update-rc.d` provider 生成 `update-rc.d <service> enable/disable 2 3 5`，并通过 `/etc/rcN.d` 下的 `S??<service>` 链接验证；rollback 写入反向 enable/disable 动作，rollback 后置验证复用同一个 SysV helper。OpenRC service 会按 runlevel diff 生成 `enable_openrc_service` 和 `disable_openrc_service`，执行侧由 `src/modules/handlers/services_openrc.zig` 统一处理：前者逐个 runlevel 执行 `rc-update add` 并在 rollback 时 `del`，后者逐个 runlevel 执行 `rc-update del` 并在 rollback 时 `add`；verify 和 rollback 后置验证都检查 `/etc/runlevels/<runlevel>/<service>` 存在或缺失。用户级 systemd enable、SysV runlevel 收敛和 OpenRC runlevel 收敛都不会自动 `start/stop/restart`；用户级 systemd 不会自动调用 `loginctl enable-linger`。其它缺失或不等价的 systemd timer、systemd socket、XDG autostart 和需要发行版语义判断的启动差异会转成 services 模块的 high-risk `manual_step` 人工审查项；这些 action 可被 include/exclude 过滤，但不会进入自动 apply。后续如果要继续自动迁移这些入口，应新增内容校验、目标用户存在性检查、`systemctl start/status`、`systemctl --user start/status`、linger/autostart/runlevel/OpenRC provider 禁用语义处理和 rollback，而不是直接把 scan 结果当成可执行动作。
+用户级 systemd unit、系统级 socket/timer、XDG autostart、SysV init 和 OpenRC 都不读取正文。这样可以发现 systemd service 运行态、定时启动、socket activation、用户会话自启动项、桌面登录自启动项、传统 runlevel 启动脚本和 OpenRC runlevel service，但避免把 `ExecStart`、环境变量、命令参数、`.desktop` 或 init 脚本正文中的敏感内容写入 inventory。plan 阶段会对源端 active/reloading/activating 而目标端不是 active-like 的 systemd service 生成 `services/review-start/<unit>` 和 `services/check-status/<unit>` 高风险人工步骤，HostLift 默认不生成可执行启动 action。plan 阶段还会对自定义且目标缺失的 systemd timer/socket 生成 `install_systemd_unit` 动作，对 enabled timer/socket 生成 `enable_systemd_unit` 动作；这两类动作复用现有 systemd unit 安装、`systemctl enable`、`systemctl is-enabled` verify 和 enable rollback。目标缺失的用户级 systemd unit 会生成 `copy_home_config` 文件型 action，并把 `owner` 设为对应用户；enabled 用户级 systemd unit 会生成 `enable_user_systemd_unit`，subject 使用 `<user>:<unit>`，执行侧由 `src/modules/handlers/services_user_systemd.zig` 统一处理，通过 `runuser -u <user> -- systemctl --user enable <unit>` 启用，通过 `runuser -u <user> -- systemctl --user is-enabled <unit>` 验证，rollback 通过同一用户上下文执行 `disable`，rollback 后置验证确认 `is-enabled` 失败。目标缺失的 XDG autostart 也会生成文件型 action：系统级 `.desktop` 走 `write_file`，用户级 `.desktop` 走 `copy_home_config`。目标缺失的 SysV/OpenRC `/etc/init.d` 脚本会生成 `write_file` 文件型 action，services handler 委托文件传输 handler 复用备份、传输、checksum/存在性 verify 和文件型 rollback。SysV init 会按 runlevel diff 生成 `enable_sysv_init` 和 `disable_sysv_init`：subject 使用 `<service>:2,3,5`，preflight 用 provider group 表达 `chkconfig` 或 `update-rc.d` 至少存在一个，执行侧由 `src/modules/handlers/services_sysv.zig` 统一探测 provider，优先选择 `chkconfig`，否则选择 `update-rc.d`；`chkconfig` provider 把逗号 runlevel 规范化成 `chkconfig --level 235 <service> on/off`，并通过 `chkconfig --list <service>` 验证；`update-rc.d` provider 生成 `update-rc.d <service> enable/disable 2 3 5`，并通过 `/etc/rcN.d` 下的 `S??<service>` 链接验证；rollback 写入反向 enable/disable 动作，rollback 后置验证复用同一个 SysV helper。OpenRC service 会按 runlevel diff 生成 `enable_openrc_service` 和 `disable_openrc_service`，执行侧由 `src/modules/handlers/services_openrc.zig` 统一处理：前者逐个 runlevel 执行 `rc-update add` 并在 rollback 时 `del`，后者逐个 runlevel 执行 `rc-update del` 并在 rollback 时 `add`；verify 和 rollback 后置验证都检查 `/etc/runlevels/<runlevel>/<service>` 存在或缺失。用户级 systemd enable、SysV runlevel 收敛和 OpenRC runlevel 收敛都不会自动 `start/stop/restart`；用户级 systemd 不会自动调用 `loginctl enable-linger`。其它缺失或不等价的 systemd timer、systemd socket、XDG autostart 和需要发行版语义判断的启动差异会转成 services 模块的 high-risk `manual_step` 人工审查项；这些 action 可被 include/exclude 过滤，但不会进入自动 apply。后续如果要继续自动迁移这些入口，应新增内容校验、目标用户存在性检查、`systemctl --user start/status`、linger/autostart/runlevel/OpenRC provider 禁用语义处理和 rollback，而不是直接把 scan 结果当成可执行动作。
 
 ### 5.2 Plan
 
@@ -955,7 +946,7 @@ hostlift apply --plan plan.json --host root@NEW --source-host root@OLD --approve
 - `src/modules/scan_registry.zig`：扫描模块注册。
 - `src/modules/plan_registry.zig`：迁移模块生命周期注册。
 - `src/modules/apply_support.zig`：approved apply action 支持判断。
-- `src/modules/registry.zig`：兼容导出门面。
+- `src/modules/registry.zig`：模块注册聚合入口。
 - `src/modules/handlers/*.zig`：模块级执行适配。
 - `src/apply/action/*.zig`：具体 action 执行逻辑。
 - `src/apply/backup.zig`：覆盖前备份。
@@ -1050,7 +1041,7 @@ hostlift remote exec --host root@NEW --approve -- systemctl status nginx
 主要代码：
 
 - `src/cli/remote.zig`：CLI 入口。
-- `src/remote/planner.zig`：兼容门面，继续导出旧调用入口。
+- `src/remote/planner.zig`：命令计划和传输计划聚合入口。
 - `src/remote/command_plan.zig`：远程命令计划构建。
 - `src/remote/transfer_plan.zig`：文件传输计划构建。
 - `src/remote/risk.zig`：命令风险分级。
@@ -1061,7 +1052,7 @@ hostlift remote exec --host root@NEW --approve -- systemctl status nginx
 - `src/remote/ssh_argv.zig`：SSH argv 前缀构建。
 - `src/remote/runner.zig`：带 timeout/retry 的子进程执行。
 - `src/remote/probe.zig`：远程路径和短命令状态探针。
-- `src/remote/exec.zig`：兼容执行门面。
+- `src/remote/exec.zig`：远程执行聚合入口。
 - `src/remote/options.zig`：timeout、retry、identity file。
 
 Remote exec 使用 argv 数组表达命令，不鼓励把复杂 shell 拼接成一条字符串。
@@ -1073,7 +1064,7 @@ Remote exec 的第一版 session/cancel 模型是轻量级的本地控制边界�
 - `operation_state_file`：控制机本地绝对路径。每次远程命令或传输尝试会追加一条 `hostlift.remote.operation_state.v1` JSONL 事件，记录 operation id、kind、attempt、retries、status 和错误名。
 - apply、rollback 和 transfer 也复用同一组 `ExecutionOptions` 字段；内部 SSH/scp/rsync/远程校验调用会继承 operation/cancel/state 元数据。
 - `remote/runner.zig` 和 `transport/runner.zig` 都通过 `remote/session.zig` 的 `Control` 检查取消并生成 retry attempt 上下文，同时通过 `remote/operation_state.zig` 追加本地状态事件，避免远程命令和文件传输各自实现一套取消/状态语义。
-- operation state 不记录 argv、host、identity file、credential provider ref 或 secret。该模型不杀掉已经启动的远端进程，也不是连接池。后续要做真正 session manager 时，应复用 `remote/session.zig` 的校验和状态边界。
+- operation state 不记录 argv、host、identity file、credential provider ref 或 secret；追加 JSONL 时会对状态文件加独占锁，避免多实例同时写入时插行。该模型不杀掉已经启动的远端进程，也不是连接池。后续要做真正 session manager 时，应复用 `remote/session.zig` 的校验和状态边界。
 
 风险分类由 `remote/risk.zig` 完成。普通状态查询可以直接计划或执行，高风险/critical 命令需要更明确的批准参数。这个机制不是完整沙箱，但能阻止最常见的误执行路径。
 
@@ -1093,13 +1084,13 @@ hostlift rollback --manifest rollback.jsonl --host root@NEW --approve
 - `src/rollback/schema.zig`：rollback entry schema 和校验。
 - `src/rollback/schema_tests.zig`：rollback entry 契约测试。
 - `src/rollback/codec.zig`：rollback JSONL 写入。
-- `src/rollback/manifest.zig`：兼容导出门面。
+- `src/rollback/manifest.zig`：rollback manifest 写入入口。
 - `src/modules/handlers/rollback.zig`：模块级 rollback 分发。
 - `src/audit/*.zig`：rollback 审计事件。
 
-Rollback 当前覆盖文件型备份恢复，以及包安装、用户/组创建、系统级和用户级 systemd enable、Docker Compose up 的部分命令型恢复。`src/rollback/dispatcher.zig` 会在 rollback handler 返回 restored 后执行后置验证：文件型 entry 检查 original path 是否存在，包安装回滚会先通过 `src/remote/package_manager.zig` 探测远端包管理器，再复用 `src/apply/action/package_provider.zig` 生成 `dpkg-query -W`、`rpm -q` 或 `pacman -Q` 验证命令，用户/组创建回滚检查 `getent passwd/group` 失败，系统级 systemd enable 回滚检查 `systemctl is-enabled` 失败，用户级 systemd enable 回滚检查 `runuser -u <user> -- systemctl --user is-enabled <unit>` 失败。后置验证失败会让 rollback 命令失败，并写入 failed 审计事件。
+Rollback 当前覆盖文件型备份恢复、`copy_data_path`/`copy_project_path` 新建路径删除型 entry，以及包安装、用户/组创建、系统级和用户级 systemd enable、Docker Compose up 的部分命令型恢复。删除型 entry 的 dry-run 和执行输出会提示它会删除整个 HostLift 新建路径，apply 后新增的数据也会被删除。`src/rollback/dispatcher.zig` 会在 rollback handler 返回 restored 后执行后置验证：文件型 entry 检查 original path 是否存在，新建路径删除型 entry 检查目标路径缺失，包安装回滚会先通过 `src/remote/package_manager.zig` 探测远端包管理器，再复用 `src/apply/action/package_provider.zig` 生成 `dpkg-query -W`、`rpm -q` 或 `pacman -Q` 验证命令，用户/组创建回滚检查 `getent passwd/group` 失败，系统级 systemd enable 回滚检查 `systemctl is-enabled` 失败，用户级 systemd enable 回滚检查 `runuser -u <user> -- systemctl --user is-enabled <unit>` 失败。后置验证失败会让 rollback 命令失败，并写入 failed 审计事件。
 
-rollback manifest 不应该被理解为整机恢复方案。它是 HostLift 已执行 action 的补偿记录，适合和云快照、磁盘快照、数据库备份一起使用。
+rollback manifest 不应该被理解为整机恢复方案。它是 HostLift 已执行 action 的补偿记录，适合和云快照、磁盘快照、数据库备份一起使用。`delete_created_path` 会在复制成功后记录 `stat:v1:<bytes>:<file_count>:<mtime>` 基线，rollback 执行前如果目标路径大小、条目数或 mtime 变化会失败关闭，避免把迁移后新增数据当作 HostLift 创建内容一起删除。
 
 ### 5.8 Audit
 
@@ -1113,12 +1104,12 @@ hostlift audit replay --log audit.jsonl --audit-sink file:replayed.jsonl --summa
 主要代码：
 
 - `src/audit/event.zig`：审计事件 schema、phase、result 和 credential source 类型。
-- `src/audit/chain.zig`：hash chain 状态和事件 hash 兼容计算。
+- `src/audit/chain.zig`：hash chain 状态和事件 hash 计算。
 - `src/audit/action_event.zig`：apply action 审计事件适配。
 - `src/audit/rollback_event.zig`：rollback entry 审计事件适配。
-- `src/audit/log.zig`：兼容写入门面。
+- `src/audit/log.zig`：审计事件写入入口。
 - `src/audit/codec.zig`：规范 JSON 编码和 hash 输入。
-- `src/audit/sink.zig`：兼容导出门面。
+- `src/audit/sink.zig`：审计 sink 聚合入口。
 - `src/audit/sink_target.zig`：`file:`、`https://`、`syslog:` target 解析。
 - `src/audit/sink_plan.zig`：把 target 转成可测试的 sink 执行计划，并集中处理未实现 sink 的失败关闭。
 - `src/audit/combined_sink.zig`：统一 file/syslog/HTTP sink 的 open/write/flush/tailHash 接口。
@@ -1253,7 +1244,7 @@ RollbackManifest 的设计原则：
 - 不能恢复的副作用应显式标记或在 action 风险中体现。
 - 回滚本身也必须 approved、policy 检查和审计。
 
-当前实现把 rollback manifest 拆成多层：`schema.zig` 定义契约和校验规则，`schema_tests.zig` 承载契约测试，`codec.zig` 负责 JSONL 写入，`manifest.zig` 保留旧导出入口。后续新增非文件副作用 rollback 时，应先扩展 schema/validator，再接入模块 handler。
+当前实现把 rollback manifest 拆成多层：`schema.zig` 定义契约和校验规则，`schema_tests.zig` 承载契约测试，`codec.zig` 负责 JSONL 写入，`manifest.zig` 保留 manifest 写入入口。后续新增非文件副作用 rollback 时，应先扩展 schema/validator，再接入模块 handler。
 
 rollback 执行分发已经拆到 `dispatcher.zig`。`command.zig` 保留命令入口、policy、audit 和逐行 manifest 循环，dispatcher 只负责根据 action id 找模块并调用 rollback handler。
 
@@ -1275,15 +1266,15 @@ rollback 执行分发已经拆到 `dispatcher.zig`。`command.zig` 保留命令�
 
 `TransferPlan` 还保存传输后端和可靠性选项：
 
-- `transport`：当前支持 `scp`、`rsync` 和 `chunk`。三者都可以 approved 执行；chunk 当前是 staging+远端 rsync 的第一版 adapter。
+- `transport`：当前支持 `scp`、`rsync` 和 `chunk`。三者都可以 approved 执行；rsync 支持本机源到目标，也支持 `source_host` 远程源由源机推送到目标；chunk 当前是 staging+远端 rsync 的第一版 adapter。
 - `partial`：只允许 rsync 使用，对应 rsync `--partial`。
 - `resumable`：只允许 rsync 使用，对应 rsync `--append-verify`，并会自动让 `partial=true`。
 - `bandwidth_limit_kbps`：可选传输限速，统一用 Kbit/s 表达。
 - `chunk_size_bytes`：只在 `transport=chunk` 时写入，当前默认 8 MiB，用来稳定后续 chunk index 和缺块上传契约。
 
-`scp + partial`、`scp + resumable`、当前尚未支持的 `source_host + rsync`、`source_host + chunk` 和非递归 `chunk` 都会在 `remote/transfer_plan.zig` 中失败关闭。这样 CLI、apply handler 和测试都复用同一套传输能力判断，不会在不同入口出现行为差异。
+`scp + partial`、`scp + resumable`、`source_host + chunk` 和非递归 `chunk` 都会在 `remote/transfer_plan.zig` 中失败关闭。`source_host + rsync` 已支持第一阶段源机推送模式，但要求源机和目标机都有 `rsync`，且源机能免交互 SSH 到目标机；`remote/preflight.zig` 会先检查源/目标命令依赖，再从源机执行 BatchMode SSH 探测目标机。`TransferPlan.remote_source_note` 会明确说明本机 identity file 只用于控制机连接源机。这样 CLI、apply handler 和测试都复用同一套传输能力判断，不会在不同入口出现行为差异。
 
-两个 plan 都支持 `operation_id`、`cancel_file` 和 `operation_state_file`。这些字段是为工单系统、AI 控制器、脚本化批次和后续 session manager 预留的轻量控制接口。当前语义是本地状态记录和本地取消标记，不是远程进程管理。
+两个 plan 都支持 `operation_id`、`cancel_file` 和 `operation_state_file`。这些字段是为本地迁移批次、AI 控制器、脚本化执行和后续 session manager 预留的轻量控制接口。当前语义是本地状态记录和本地取消标记，不是远程进程管理。
 
 ### 6.7 错误处理和返回语义
 
@@ -1305,7 +1296,7 @@ HostLift 的数据契约按“追加优先”演进：
 - 老字段不改变含义。
 - action id 和 action type 一旦被用户依赖，应视为外部契约。
 - 审计校验器需要读旧写新。
-- facade 文件保留旧导出，内部实现逐步拆分。
+- 聚合入口保持薄分发，内部实现逐步拆到领域模块；未发布阶段遇到冲突直接重构调用点。
 
 这样可以让旧 inventory、旧 plan、旧 audit log 在新版本中继续被读取和验证。
 
@@ -1362,14 +1353,15 @@ rollback/<module>.zig         可选，恢复逻辑
 | sudoers | 已有 `src/inventory/sudoers.zig` 和 `src/inventory/schema_parts/sudoers.zig` 做只读事实扫描，`src/plan/modules/sudoers_review.zig` 会生成 `manual_step` 审查项；后续再补自动 apply | 语法错误会导致权限恢复困难，需要单独 validate、`visudo -c` 和 rollback |
 | ACL | 已有 `src/inventory/acl.zig` 和 `src/inventory/schema_parts/acl.zig` 做只读事实扫描，`src/plan/modules/acl_review.zig` 会生成 `manual_step` 审查项；后续再补 apply/rollback | 扩展权限不能当成普通 mode 位复制，需要 setfacl 验证和 rollback |
 | 防火墙 | `src/firewall/*`、`src/plan/modules/firewall.zig` | reload 可能切断 SSH，需要恢复窗口和端口检查 |
-| systemd 服务、timer 和 socket | `src/inventory/services.zig`、`src/inventory/services_systemd.zig`、`src/plan/modules/services_systemd.zig`、`src/apply/action/services.zig`；service 运行态差异生成 high-risk `manual_step`，custom timer/socket 缺失时可安装 unit，enabled timer/socket 可生成 enable 动作，并复用 systemd unit verify/rollback；复杂 timer/socket 差异仍生成 `manual_step` 审查项 | enable/start/restart 和 socket activation 会改变运行时状态；复杂 timer/socket 语义还需要独立 verify/rollback |
+| systemd 服务、timer 和 socket | `src/inventory/services.zig`、`src/inventory/services_systemd.zig`、`src/plan/modules/services_systemd.zig`、`src/apply/action/services.zig`；service 会扫描运行态、drop-in、env 文件和 `systemctl show` 依赖摘要，运行态差异生成 `services/review-start/*` 和 `services/check-status/*` 高风险人工步骤，依赖摘要差异生成 `services/review-deps/*`，默认不生成可执行启动 action；custom timer/socket 缺失时可安装 unit，enabled timer/socket 可生成 enable 动作，并复用 systemd unit verify/rollback；复杂 drop-in/env/timer/socket 差异仍生成 `manual_step` 审查项 | start/restart 和 socket activation 会改变运行时状态；SysV/OpenRC start/stop、复杂 timer/socket 语义和更深日志/HTTP verify 仍需独立 provider |
 | 用户级 systemd unit | 当前由 `src/inventory/services_user_units.zig` 做只读扫描，记录 `~/.config/systemd/user` 下的 service/timer/socket 元数据；`src/plan/modules/services_user_systemd.zig` 会为目标缺失的 unit 文件生成 `copy_home_config`，由 services handler 委托文件传输 handler 执行备份、复制、权限修复、verify 和 rollback；enabled unit 会生成 `enable_user_systemd_unit`，`src/modules/handlers/services_user_systemd.zig` 通过 `runuser` 执行 `systemctl --user enable/is-enabled/disable` 并写命令型 rollback entry，同时提供 rollback 后置验证 | 文件复制和 enable 状态可以受控自动化；用户会话 `start/status`、linger、环境变量和启动命令仍需要独立 provider、深度 verify 和 rollback |
 | XDG autostart | 当前由 `src/inventory/services_xdg.zig` 做 scan-only，记录系统级和用户级 `.desktop` 文件元数据；`src/plan/modules/services_xdg.zig` 会为目标缺失项生成文件型 action，系统级走 `write_file`，用户级走 `copy_home_config`，并由 services handler 委托到文件传输 handler；复杂差异仍生成 `manual_step` | `.desktop` 可包含命令、环境变量和桌面会话条件，复杂自动迁移前需要内容解析、禁用语义和 rollback |
 | SysV init | 当前由 `src/inventory/services_sysv.zig` 做只读扫描，记录 `/etc/init.d` 脚本和 `/etc/rc*.d/S*` runlevel 链接摘要；`src/plan/modules/services_sysv.zig` 会为目标缺失脚本生成 `write_file` 文件型 action，并用 `enable_sysv_init`/`disable_sysv_init` 收敛源/目标 runlevel 差异；`src/modules/handlers/services_sysv.zig` 通过 `chkconfig` 或 `update-rc.d` provider 完成 enable/disable、verify 和 rollback 后置验证 | 文件本体和 runlevel add/del 可以受控自动化；init 脚本可能包含任意 shell，start/stop/restart、更多发行版 fixture 和复杂内容语义仍需要补齐 |
 | OpenRC | 当前由 `src/inventory/services_openrc.zig` 做只读扫描，记录 `/etc/init.d` service 和 `/etc/runlevels/*/<service>` runlevel 链接摘要；`src/plan/modules/services_openrc.zig` 会为目标缺失 service 脚本生成 `write_file` 文件型 action，并用 `enable_openrc_service`/`disable_openrc_service` 收敛源/目标 runlevel 差异；`src/modules/handlers/services_openrc.zig` 通过 `rc-update add/del` 和 `/etc/runlevels/<level>/<service>` 存在性检查完成 apply、verify、rollback 和 rollback 后置验证 | 文件本体和 runlevel add/del 可以受控自动化；OpenRC service 脚本可能包含任意 shell，start/stop/restart、provider 级 fixture 和跨发行版边界仍需要补齐 |
-| Docker/Podman | 当前由 `src/inventory/docker.zig` 聚合，`docker_runtime.zig`、`docker_containers.zig`、`docker_resources.zig` 和 `docker_compose.zig` 分别做 scan-only 事实扩展，包含 runtime、运行中容器、volume、volume mountpoint、network、image 和 Compose 文件候选；Docker/Podman 资源记录带 runtime 字段，plan 层按运行时分开比对；`src/plan/modules/container_review.zig` 会生成容器 `manual_step` 审查项，目标缺失 volume 且源端能解析 mountpoint 时会额外生成高风险 `copy_data_path` 动作，复用通用 transfer handler；后续 apply 再拆 `src/container/*` 或 `src/apply/action/containers.zig` | volume 数据复制前必须停止写入者或做应用一致性备份；network、compose 状态和镜像来源都需要独立 verify |
-| 存储和挂载 | 已有 `src/inventory/storage.zig` 和 `src/inventory/schema_parts/storage.zig` 做只读事实扫描，`src/plan/modules/storage_review.zig` 会生成 `manual_step` 审查项；后续再补 apply/rollback | fstab、权限、挂载点和数据一致性风险高 |
-| 系统基线 | `src/inventory/system_baseline.zig` 和 `src/inventory/schema_parts/system_baseline.zig` 只读扫描 locale/timezone、PAM、NTP、sysctl、LDAP/SSSD、DNS/NSS、静态网络、hosts、LVM/ZFS/Btrfs 命令事实、at jobs、脚本安装应用和敏感材料存在性；locale、timezone、sysctl、limits、NTP、resolv.conf、nsswitch、NFS exports 和存储池命令输出会进入结构化 `config_facts`；`src/plan/modules/system_baseline_review.zig` 对高风险差异生成 `manual_step`，`/etc/hosts` 差异额外生成可选文件型迁移动作 | 这些配置强依赖发行版、网络、身份源和安全策略，除 `/etc/hosts` 外不能当普通文件自动覆盖 |
+| Docker/Podman | 当前由 `src/inventory/docker.zig` 聚合，`docker_runtime.zig`、`docker_containers.zig`、`docker_resources.zig` 和 `docker_compose.zig` 分别做 scan-only 事实扩展，包含 runtime、运行中容器、容器 mount 摘要、volume、volume mountpoint、network、image 和 Compose 文件候选；Docker/Podman 资源记录带 runtime 字段，plan 层按运行时分开比对；`src/plan/modules/container_review.zig` 会生成 runtime、network、image、compose、container 重建和健康检查 `manual_step`，目标缺失 volume 且源端能解析 mountpoint 时会额外生成高风险 `copy_data_path` 动作，运行中容器 mount source 精确匹配 volume name 或 mountpoint 时会先生成 `docker/stop-writers/<volume>`；后续 apply 再拆 `src/container/*` 或 `src/apply/action/containers.zig` | volume 数据复制前必须停止写入者或做应用一致性备份；network/容器自动重建、compose 状态和镜像来源都需要独立 verify |
+| 整机资源 | `src/inventory/resources.zig` 和 `schema_parts/resources.zig` 生成资源地图，记录 app/data 根、home 状态、XDG 登录态、cache、包管理器托管 executable、未托管 executable/install root 的大小、磁盘占用、文件数、包归属、文件类型、SHA256、owner/mode/mtime、轻量权限风险、`readelf`/`objdump` 静态动态依赖摘要和发现证据；scanner 会主动扫描常见 PATH 目录和用户级 bin，常见 bin 目录直下 executable 默认按单文件 review，明确应用根才归并为 install root；`src/plan/modules/resources.zig` 按默认动作生成高风险 `copy_data_path`、通用 `resources/reinstall/<path>`、`resources/security-review/<path>`、大目录 `resources/verify-manifest/<path>`、`resources/capacity/<name>`、`resources/cleanup-review/<path>` 人工步骤或其它 `manual_step`，执行仍复用通用 transfer handler | 不按应用名硬编码；轻量风险报告不是杀毒，ClamAV/YARA/hash allowlist/签名校验属于可选 provider；cleanup 只审查不默认删除 |
+| 存储和挂载 | 已有 `src/inventory/storage.zig` 和 `src/inventory/schema_parts/storage.zig` 做只读事实扫描，`src/plan/modules/storage_review.zig` 会按 fstab、mount、NFS/CIFS、LVM/ZFS/Btrfs 等生成操作清单式 `manual_step`；后续再补 apply/rollback | fstab、权限、挂载点和数据一致性风险高 |
+| 系统基线 | `src/inventory/system_baseline.zig` 和 `src/inventory/schema_parts/system_baseline.zig` 只读扫描 locale/timezone、PAM、NTP、sysctl、LDAP/SSSD、DNS/NSS、网络地址/路由、hosts、LVM/ZFS/Btrfs 命令事实、TLS/证书路径、系统环境变量、语言运行时目录、at/anacron 线索、脚本安装候选和敏感材料存在性；脚本安装候选按通用 user bin/runtime/package-manager/config/install root 分类，尽量提取 source URL、版本、checksum 和 config hint；locale、timezone、sysctl、limits、NTP、resolv.conf、nsswitch、NFS exports、network 命令摘要、system env 和存储池命令输出会进入结构化 `config_facts`；`src/plan/modules/system_baseline_review.zig` 对高风险差异生成 `manual_step`，`/etc/hosts` 差异额外生成可选文件型迁移动作 | 这些配置强依赖发行版、网络、身份源和安全策略，除 `/etc/hosts` 外不能当普通文件自动覆盖；未知来源脚本只提示人工重装，不自动下载执行 |
 | SELinux/AppArmor | 已有 `src/inventory/security_policy.zig` 和 `src/inventory/schema_parts/security_policy.zig` 做只读事实扫描，`src/plan/modules/security_policy_review.zig` 会生成 `manual_step` 审查项；后续再补 apply/rollback | 策略语义复杂，不能当成普通配置文件覆盖 |
 
 这些模块的共同要求：
@@ -1473,7 +1465,7 @@ plan/modules/sudoers_review.zig
   -> 已实现：比较 source/target sudoers 元数据，生成 sudoers manual_step 人工审查 action，不输出规则正文
 
 plan/modules/manual_review.zig
-  -> 已实现：保留高风险人工审查规则的薄门面和聚合测试；运行时 registry 直接引用各领域 review 模块
+  -> 已实现：只保留高风险人工审查规则的聚合测试；运行时 registry 直接引用各领域 review 模块
 
 plan/modules/sudoers.zig
   -> 后续：生成 sudoers/copy-file 或 sudoers/install-snippet 自动迁移动作
@@ -1538,7 +1530,7 @@ remote/package_manager.zig
   -> rollback remove 和 rollback verify 共享远端包管理器探测
 ```
 
-`inventory/packages.zig` 仍负责实际探测、读取仓库文件和运行扫描命令；`apply/action/packages.zig` 仍负责组装最终 argv 并保留兼容入口；`remote/package_manager.zig` 负责 approved rollback 阶段在目标机上探测实际可用包管理器。Provider 只负责“某个包管理器该用什么命令”，不负责决定要安装哪些包。是否迁移、迁移哪些包仍由 plan、filter 和 policy 决定。
+`inventory/packages.zig` 仍负责实际探测、读取仓库文件和运行扫描命令；`apply/action/packages.zig` 负责组装最终 argv；`remote/package_manager.zig` 负责 approved rollback 阶段在目标机上探测实际可用包管理器。Provider 只负责“某个包管理器该用什么命令”，不负责决定要安装哪些包。是否迁移、迁移哪些包仍由 plan、filter 和 policy 决定。
 
 后续需要继续补齐：
 
@@ -1665,7 +1657,7 @@ OperatorIdentity
 传输层当前有三类后端契约：
 
 - scp：简单复制，适合小文件和基础场景。
-- rsync：支持目录同步、`--partial` 和 `--append-verify`，适合本机到目标机的大目录重试和续传辅助。
+- rsync：支持目录同步、`--partial` 和 `--append-verify`，适合本机到目标机的大目录重试和续传辅助；`source_host + rsync` 会 SSH 到源机，由源机执行 rsync 推送到目标机，并在执行前探测源机到目标机的 BatchMode SSH 连通性。
 - chunk：HostLift 原生分块传输的第三个后端，当前有计划、索引契约和 staging+远端 rsync 第一版执行 adapter。
 
 传输可靠性选项集中在 `TransferPlan` 上表达：
@@ -1676,9 +1668,9 @@ OperatorIdentity
 - `--bwlimit` / `--transfer-bwlimit` 让 `TransferPlan.bandwidth_limit_kbps` 保存非零 Kbit/s 数值；scp adapter 使用 `-l <kbps>`，rsync adapter 向上取整转换成 `--bwlimit=<KB/s>`。
 - `--transport chunk` 让 `TransferPlan.transport=chunk`，并写入默认 `chunk_size_bytes=8388608`。当前只允许本机源目录递归计划；`source_host + chunk` 和非递归 chunk 都会失败关闭。
 
-这些组合规则集中在 `src/remote/transfer_rules.zig`，`src/remote/transfer_plan.zig` 只负责 host/path 校验、执行选项归一化和 `TransferPlan` 组装。后续新增 chunk 执行、P2P 或 agent 后端时，应优先扩展 rules 和 adapter，而不是把后端分支散落到 CLI 或 apply handler。
+这些组合规则集中在 `src/remote/transfer_rules.zig`，`src/remote/transfer_plan.zig` 只负责 host/path 校验、执行选项归一化和 `TransferPlan` 组装。后续新增 chunk 远程源、P2P agent 或其它后端时，应优先扩展 rules 和 adapter，而不是把后端分支散落到 CLI 或 apply handler。
 
-当前 rsync adapter 只支持本机到目标机。远程源到远程目标的传输仍走 scp 的 `-3` 模式；`source-host + rsync` 在计划构建阶段拒绝，直到实现源侧执行或专门的 P2P/agent transport。
+当前 rsync adapter 的远程源模式不引入常驻 agent：控制机 SSH 到源机，源机执行 `rsync -a ... <target-host>:<target-path>`。本机 identity file 只用于控制机连接源机；源机连接目标机需要依赖源机上的 SSH 配置或 agent。`source_host + chunk` 仍在计划构建阶段拒绝。
 
 远程 manifest 的实现拆成两层：
 
@@ -1760,9 +1752,9 @@ HostLift 适合给 AI 提供结构化上下文和受控执行接口：
 
 1. AI 读取 inventory、plan、validate 报告和 dry-run 输出。
 2. AI 给出模块过滤、风险说明和迁移批次。
-3. 人或审批系统确认。
+3. 人工在本地确认。
 4. HostLift 执行带 `--approve`、`--operator`、`--approval-ticket` 和 `--policy` 的命令。
-5. 审计日志和 rollback manifest 回写到工单或外部系统。
+5. 审计日志和 rollback manifest 保存到本地迁移目录，必要时再交给外部系统归档。
 
 AI 不应该绕过 HostLift 直接拼接远程 shell 批量执行。
 
@@ -1840,28 +1832,28 @@ scripts/check.sh
 - rollback 参数解析已拆到 `src/rollback/options.zig`。
 - transport 远程探针已拆到 `src/transport/remote_probe.zig`。
 - remote 命令计划、传输计划、风险分类和默认值已拆到 `src/remote/command_plan.zig`、`transfer_plan.zig`、`risk.zig` 和 `defaults.zig`。
-- remote SSH argv、runner、状态探针和执行门面已拆到 `src/remote/ssh_argv.zig`、`runner.zig`、`probe.zig` 和 `exec.zig`。
+- remote SSH argv、runner、状态探针和执行入口已拆到 `src/remote/ssh_argv.zig`、`runner.zig`、`probe.zig` 和 `exec.zig`。
 - firewall 后端识别已拆到 `src/firewall/backend.zig`。
-- inventory schema 已拆出 `module_inventory.zig` 和 `schema_parts`，`schema.zig` 只保留兼容导出和顶层 Inventory。
+- inventory schema 已拆出 `module_inventory.zig` 和 `schema_parts`，`schema.zig` 只保留顶层 Inventory 聚合入口。
 - inventory scanner 已拆出 `scan_filter` 和 `scan_runner`，`scanner.zig` 只保留顶层 inventory 组装。
 - firewall reload 已拆出 `recovery.zig`，恢复窗口上传、调度和取消不再混在 reload 编排里。
-- rollback manifest 已拆出 `schema.zig`、`schema_tests.zig` 和 `codec.zig`，`manifest.zig` 只保留兼容导出。
+- rollback manifest 已拆出 `schema.zig`、`schema_tests.zig` 和 `codec.zig`，`manifest.zig` 只保留写入入口。
 - rollback dispatcher 已拆出 `dispatcher.zig`，action id 到模块 handler 的映射不再混在命令编排里。
-- audit action/rollback 事件适配已拆到 `action_event.zig` 和 `rollback_event.zig`，`log.zig` 只保留兼容导出和通用事件入口。
+- audit action/rollback 事件适配已拆到 `action_event.zig` 和 `rollback_event.zig`，`log.zig` 只保留通用事件写入入口。
 
 仍然需要继续治理：
 
-- `inventory/schema.zig` 已降为兼容 facade，后续新增领域类型不要回流到该文件。
+- `inventory/schema.zig` 已降为顶层 Inventory 聚合入口，后续新增领域类型不要回流到该文件；如果调用点冲突，直接重构。
 - syslog 审计 sink 已有本机 `logger` adapter，HTTPS 审计 sink 已有本机 `curl` adapter；SIEM 级签名、队列、重放、mTLS 和外部时间戳锚定仍需要新增 provider。
 - `inventory/scanner.zig` 已继续拆出 scan 编排和 warning 聚合；package manager 第一层 provider 已落地，rollback 执行和 rollback 后置验证已复用远端包管理器探测，后续重点转向 scanner fixture、多发行版测试和包管理器失败注入。
 - module registry 已按 scan、plan lifecycle、apply support 和基础 apply 依赖声明拆分，后续重点是补 provider 级依赖、内容级 verify 和策略化禁用。
-- `util/inventory_summary_overview.zig` 和 `util/inventory_summary_details.zig` 已把顶层概览和详情输出从摘要门面中拆出。
+- `util/inventory_summary_overview.zig` 和 `util/inventory_summary_details.zig` 已把顶层概览和详情输出从摘要聚合入口中拆出。
 
-以企业级标准看，当前是“架构方向正确的工程核心”，还不是完整企业平台。缺口主要在 RBAC、集中审计、凭据托管、审批系统、集成测试矩阵、集中配置和更完整的 rollback/verify。
+以个人服务器迁移标准看，当前已经有结构化 scan/plan/apply 骨架，resources 单文件边界、用户级 bin 主动扫描、ELF 静态动态依赖摘要、SHA256/权限/mtime 轻量风险报告、通用 reinstall 人工步骤、source-host rsync 及源机到目标机 BatchMode 连通预检、常见有状态数据目录备份提醒和具体 dump/restore 操作清单、目标容量/inode 预检和 apply 前实时容量/inode 复核、service drop-in/env/依赖摘要审查、systemd review-start/status、网络/证书/SSH host key/system env/语言运行时事实、cleanup review、HTTP/TCP/日志健康检查提示、批次化 `plan --selection` 选择清单和 `plan --health-report` 迁移后健康检查报告已经补强。当前默认个人迁移主线不再要求继续硬做可信自动 reinstall provider、远程源 chunk/agent、自动执行 dump/restore hook 或可插拔内容安全扫描；这些更适合作为显式 opt-in 或后续增强。
 
-## 15. 企业级目标架构
+## 15. 未来扩展边界
 
-如果继续做成企业级产品，建议保持当前单机 CLI 核心，同时增加外部控制面：
+当前个人使用不应优先做在线审批、RBAC、Vault 或 SIEM 级集中审计。后续如果确实要做成企业产品，可以在保持当前单机 CLI 核心的前提下增加外部控制面：
 
 ```text
 CLI / TUI / API / AI Adapter
@@ -1874,7 +1866,16 @@ CLI / TUI / API / AI Adapter
   -> rollback and verification
 ```
 
-需要补齐的能力：
+个人迁移后续可选增强：
+
+- 脚本安装应用可信自动 reinstall provider；当前已做 source URL、版本、checksum 和 config hint 报告，但不自动执行未知下载脚本。
+- 语言运行时和用户级包管理器的重建建议。
+- 远程源到目标的 chunk/agent 传输和更完整 P2P 能力。
+- 更完整的交互式 TUI；当前 plan summary 已输出个人迁移推荐批次并单独展示 resources 数量，`plan --selection` 输出批次化文本选择清单，`plan --health-report` 汇总迁移后健康检查项，apply 递归复制前已做实时容量和 inode 复核。
+- 有状态服务运行态识别和自动执行 dump/restore hook；当前只生成具体操作清单，不自动执行数据库命令。
+- 完整 TUI/交互式资源选择；当前保留文本向导，不做企业控制台。
+
+下面这些是企业化扩展，不是当前个人使用优先级：
 
 - 中央策略源和签名 policy。
 - 审批 ticket 在线校验和签名校验。
@@ -1940,4 +1941,4 @@ CLI 仍然可以保持单机可用；provider 是增强，不应该变成基本�
 
 HostLift 当前已经具备 Linux 迁移工具的核心骨架：结构化扫描、计划、过滤、策略、受控执行、审计和回滚。代码架构已经从单文件脚本式实现，逐步拆成可维护的领域模块。
 
-下一阶段重点不应是继续堆命令，而是补齐企业级边界：凭据 provider、审批 provider、集中审计 sink、模块级 verify/rollback、传输可靠性和多发行版集成测试。只要继续保持 schema、registry、security、remote、transport、audit、rollback 的边界稳定，HostLift 可以从 CLI 工具平滑演进到 TUI、API 或 AI 迁移执行平台。
+下一阶段重点不应继续堆企业治理能力，而应围绕个人服务器迁移的真实落地质量：真实 Linux 样本演练、多发行版 fixture、失败场景注入、更深 action verify/rollback、可选远程源 chunk/agent、配置 merge 建议和健康检查证据归档。继续保持 schema、registry、security、remote、transport、audit、rollback 的边界稳定即可，不需要为了个人迁移场景引入重型企业审批平台。

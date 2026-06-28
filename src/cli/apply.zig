@@ -128,6 +128,18 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, w
             try apply_audit.writeFailureAndFlush(&sink_result.sink, audit_ctx, action, err);
             return err;
         };
+        _ = apply_backup.writeCreatedPathRollbackEntryWithOptions(
+            io,
+            allocator,
+            action,
+            apply_host,
+            &manifest_writer.interface,
+            parsed.value.created_at,
+            options.apply_options.execution,
+        ) catch |err| {
+            try apply_audit.writeFailureAndFlush(&sink_result.sink, audit_ctx, action, err);
+            return err;
+        };
         try apply_audit.writeAction(&sink_result.sink, audit_ctx, action, .succeeded, "succeeded");
     }
     try manifest_writer.flush();

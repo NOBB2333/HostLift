@@ -34,7 +34,9 @@ pub fn writeCustomServiceSummary(writer: anytype, units: []const inventory.Servi
             try writer.writeAll("\nEnabled or custom services:\n");
             wrote_header = true;
         }
-        try writer.print("  - {s} [{s}, {s}{s}]\n", .{ unit.name, @tagName(unit.state), @tagName(unit.active_state), if (unit.custom) ", custom" else "" });
+        try writer.print("  - {s} [{s}, {s}{s}]", .{ unit.name, @tagName(unit.state), @tagName(unit.active_state), if (unit.custom) ", custom" else "" });
+        if (unit.dependency_summary) |summary| try writer.print(" deps={s}", .{summary});
+        try writer.writeByte('\n');
         shown += 1;
     }
     if (total > shown) try writer.print("  ... {d} more\n", .{total - shown});
@@ -244,7 +246,13 @@ pub fn writeSystemBaselineSummary(writer: anytype, baseline: inventory.SystemBas
     if (baseline.script_apps.len > 0) {
         try writer.writeAll("\nScript-installed app candidates:\n");
         for (baseline.script_apps[0..@min(baseline.script_apps.len, 40)]) |app| {
-            try writer.print("  - {s} [{s}] {s}\n", .{ app.name, @tagName(app.kind), app.path });
+            try writer.print("  - {s} [{s}] {s}", .{ app.name, @tagName(app.kind), app.path });
+            if (app.evidence) |evidence| try writer.print(" evidence={s}", .{evidence});
+            if (app.source_hint) |hint| try writer.print(" source={s}", .{hint});
+            if (app.version_hint) |hint| try writer.print(" version={s}", .{hint});
+            if (app.checksum_hint) |hint| try writer.print(" checksum={s}", .{hint});
+            if (app.config_hint) |hint| try writer.print(" config={s}", .{hint});
+            try writer.writeByte('\n');
         }
         if (baseline.script_apps.len > 40) try writer.print("  ... {d} more\n", .{baseline.script_apps.len - 40});
     }

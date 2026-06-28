@@ -22,7 +22,7 @@ pub fn appendActions(
             .subject = path.path,
             .module = .system_baseline,
             .risk = riskForPath(path.kind),
-            .description = descriptionForPath(path.kind),
+            .description = descriptionForPathFact(path),
         });
     }
 
@@ -58,7 +58,7 @@ pub fn appendActions(
             .subject = fact.source,
             .module = .system_baseline,
             .risk = riskForPath(fact.kind),
-            .description = descriptionForPath(fact.kind),
+            .description = descriptionForConfigFact(fact),
         });
     }
 
@@ -190,7 +190,7 @@ fn commandIsCoveredByPathFacts(name: []const u8) bool {
 fn riskForPath(kind: inventory.SystemPathKind) plan.RiskLevel {
     return switch (kind) {
         .pam, .identity, .security, .storage, .remote_mount => .critical,
-        .kernel_module, .limits, .ntp, .sysctl, .dns, .nss, .network, .timezone, .locale => .high,
+        .kernel_module, .limits, .ntp, .sysctl, .dns, .nss, .network, .timezone, .locale, .system_env, .runtime_env => .high,
         .logrotate, .profile, .tmpfiles, .script_app => .medium,
     };
 }
@@ -204,6 +204,12 @@ fn riskForCommand(name: []const u8) plan.RiskLevel {
         std.mem.eql(u8, name, "btrfs"))
     {
         return .critical;
+    }
+    if (std.mem.startsWith(u8, name, "ip-") or
+        std.mem.eql(u8, name, "nmcli-connections") or
+        std.mem.eql(u8, name, "networkctl"))
+    {
+        return .high;
     }
     return .high;
 }
@@ -228,8 +234,35 @@ fn descriptionForPath(kind: inventory.SystemPathKind) []const u8 {
         .nss => "Review NSS lookup chain before manual migration",
         .network => "Review static network configuration before manual migration; HostLift does not reconfigure IP addresses automatically",
         .security => "Review certificates or sensitive security material manually; HostLift does not migrate secrets by default",
+        .system_env => "Review system environment variables before migration; global PATH, proxy and runtime variables can change application behavior",
+        .runtime_env => "Review language runtime manager state before migration; prefer reinstall or manifest export instead of copying caches blindly",
         .script_app => "Review script-installed application path before reinstalling",
     };
+}
+
+fn descriptionForPathFact(path: inventory.SystemPathFact) []const u8 {
+    if (path.kind == .security) {
+        if (std.mem.startsWith(u8, path.path, "/etc/letsencrypt")) {
+            return "Review Let's Encrypt certs, renewal config and account keys manually; decide whether to migrate private keys or issue new certs on target";
+        }
+        if (std.mem.startsWith(u8, path.path, "/etc/ssl")) {
+            return "Review CA bundle, business certificates and private key paths separately; do not copy private keys without explicit confirmation";
+        }
+        if (std.mem.startsWith(u8, path.path, "/etc/nginx") or
+            std.mem.startsWith(u8, path.path, "/etc/caddy") or
+            std.mem.startsWith(u8, path.path, "/etc/traefik"))
+        {
+            return "Review web proxy TLS references and certificate/key dependencies before migration; merge config without blindly copying secrets";
+        }
+    }
+    return descriptionForPath(path.kind);
+}
+
+fn descriptionForConfigFact(fact: inventory.SystemConfigFact) []const u8 {
+    if (fact.kind == .runtime_env) {
+        return "Review language runtime rebuild facts; prefer reinstall/export manifests and avoid copying package caches blindly";
+    }
+    return descriptionForPath(fact.kind);
 }
 
 // 根据命令名称返回审查描述。
@@ -242,6 +275,12 @@ fn descriptionForCommand(name: []const u8) []const u8 {
     }
     if (std.mem.eql(u8, name, "btrfs")) {
         return "Review Btrfs filesystems and subvolumes before manual migration";
+    }
+    if (std.mem.startsWith(u8, name, "ip-") or
+        std.mem.eql(u8, name, "nmcli-connections") or
+        std.mem.eql(u8, name, "networkctl"))
+    {
+        return "Review network addresses, routes and link definitions before migration; HostLift does not apply network changes automatically";
     }
     return "Review command-derived system baseline fact before migration";
 }

@@ -317,7 +317,7 @@ hostlift/
 └── CODE_QUALITY_zh.md
 ```
 
-`src/security/validation.zig`、`src/credentials/source.zig`、`src/policy/*.zig`、`src/remote/*.zig` 和 `src/transport/*.zig` 已经完成第一轮落地：安全层集中 host、argv token 和路径校验，凭据层集中 SSH identity file 来源元数据和审计来源名称，策略层集中 action allow/deny、host allowlist、risk 阈值、策略文件读取和原始策略 hash，其中 policy schema、RuleSet 校验和子规则派生已拆到 `src/policy/ruleset.zig`，通用匹配/风险排序逻辑已拆到 `src/policy/match.zig`；remote 层已把默认值、命令计划、传输计划、风险分类、执行选项、SSH argv、子进程 runner、远程状态探针、operation id/cancel file 和 SSH 执行门面拆到独立文件，`src/remote/planner.zig` 和 `src/remote/exec.zig` 只保留兼容门面；传输层承接 scp/rsync 执行、远程探针、远程 manifest 构建和 chunk 文件粒度增量 adapter，其中远程 `find/stat/sha256sum` 探针已拆到 `src/transport/remote_probe.zig`，chunk 路径校验和上传 argv 已拆到 `src/transport/chunk_paths.zig` 与 `src/transport/chunk_upload.zig`。下一步应继续把 transport 扩展成强续传 chunk/P2P/agent 多实现边界，把 credentials 扩展成短期凭据和 vault provider 边界，把 policy 扩展成签名策略、远程策略源和在线审批校验；`src/cli/*.zig` 已经完成第一轮命令拆分，`src/cli/apply_options.zig`、`apply_policy.zig` 和 `apply_dry_run.zig` 已把 apply 参数解析、policy 评估输出和 dry-run 输出从 apply 主编排中拆开，`src/cli/common_options.zig` 进一步复用 apply/rollback 共享的 operator、审批凭证、审计 sink、host-authz 和远程执行元数据解析；`src/transfer/options.zig` 已把 transfer argv 解析、默认值和传输后端解析从 `src/transfer/command.zig` 拆出，`src/transfer/manifest_flow.zig` 已把 source manifest 需求判断、manifest 约束校验、本地/远程源 manifest 构建、manifest 输出和远程目标 manifest 校验从 `command.zig` 拆出；`src/inventory/platform.zig`、`src/inventory/package_manager.zig`、`src/inventory/scan_filter.zig`、`src/inventory/scan_runner.zig` 和 `src/inventory/scanner.zig` 已把主机平台读取、包管理器探测/扫描命令映射、扫描模块过滤、scan handler 执行/warning 聚合和顶层 inventory 组装分开，`src/inventory/module_inventory.zig` 已把模块清单聚合类型、空模块 fixture 和模块 deinit 从 schema facade 中拆出；`src/plan/filter_match.zig` 已把模块名解析、action pattern 校验和匹配规则从 `src/plan/filter.zig` 拆出，`filter.zig` 只保留过滤器结构和 plan action 裁剪；`src/apply/action/package_provider.zig` 已把包安装、验证和卸载命令前缀从 `packages.zig` 中抽出，`packages.zig` 保留兼容命令构造入口；`src/firewall/backend.zig`、`src/firewall/recovery.zig` 和 `src/firewall/reload.zig` 已把后端命令/恢复脚本、systemd-run 延迟恢复任务和 reload 编排分开；`src/modules/handler.zig`、`src/modules/scan_registry.zig`、`src/modules/plan_registry.zig`、`src/modules/apply_support.zig`、`src/modules/registry.zig` 和 `src/modules/handlers/*.zig` 已经让 scan 聚合、scan 模块 include/exclude、scan 失败降级、规划、approved apply、部分 verify、文件型 rollback、包安装 rollback、用户/组创建 rollback、系统级/用户级 systemd enable rollback 和 Compose up rollback 通过 handler registry 分发，其中 `registry.zig` 只保留兼容门面；`src/rollback/schema.zig`、`src/rollback/codec.zig`、`src/rollback/manifest.zig`、`src/rollback/options.zig`、`src/rollback/dispatcher.zig` 和 `src/rollback/command.zig` 已经把 rollback entry 契约校验、JSONL 写入、兼容门面、argv 解析、模块分发和执行编排分开，`src/rollback/schema_tests.zig` 承载 rollback schema 行为测试；`src/audit/event.zig`、`src/audit/action_event.zig`、`src/audit/rollback_event.zig`、`src/audit/chain.zig`、`src/audit/log.zig`、`src/audit/codec.zig`、`src/audit/sink_target.zig`、`src/audit/file_sink.zig`、`src/audit/writer_sink.zig`、`src/audit/sink.zig` 和 `src/audit/verify_event.zig` 已经为 approved apply/rollback 提供审计事件 schema、apply/rollback 事件适配、hash chain、兼容写入门面、规范 JSON/hash、历史字段集兼容、sink target 配置边界、本地文件 sink、任意 writer sink、兼容导出门面和 audit verify 单事件校验边界；下一步应把深度 verify、模块依赖声明、策略化模块禁用、集中审计和其余非文件副作用 rollback 的真实执行也迁移到同一契约。
+`src/security/validation.zig`、`src/credentials/source.zig`、`src/policy/*.zig`、`src/remote/*.zig`、`src/transport/*.zig`、`src/modules/*`、`src/rollback/*` 和 `src/audit/*` 已经形成第一轮清晰边界：安全层集中 host/path/argv/identity 校验，凭据层只描述 SSH identity 来源，策略层处理本地 allow/deny/risk/host/operator/ticket 约束，remote/transport 层是 SSH、scp、rsync、chunk 和远程 manifest 的唯一出口，module handler 负责 scan/plan/apply/verify/rollback 生命周期分发，rollback/audit 负责补偿记录和执行证据。项目未正式发布，后续边界冲突时直接重构调用点，不新增旧 API 兼容层；下一步重点是围绕个人服务器迁移补深度 verify、provider 级依赖、远程源 chunk/agent、字节块级 chunk 和剩余非文件副作用 rollback。
 
 ## 4. 核心工作流程
 
@@ -335,85 +335,71 @@ hostlift/
      |  [扫描完成，可以离线保存清单]                  |  [扫描完成，可以离线保存清单]
 ```
 
-**阶段二：连接与迁移**
+**阶段二：规划与迁移**
 
 ```
-源主机 (Source)                              目标主机 (Target)
-     |                                            |
-     |  hostlift export                           |  hostlift import --source <ip>
-     |  等待目标连接...                             |  连接到源主机
-     |                                            |
-     |  TLS 握手 + 认证                             |
-     | <---------------------------------------> |
-     |                                            |
-     |  交换清单                                    |
-     | <---------------------------------------> |
-     |                                            |
-     |  生成对比视图 (类似 Git diff)                 |  显示对比视图
-     |  发送给目标                                   |  用户审查差异
-     | -----------------------------------------> |
-     |                                            |
-     |  接收用户选择                                 |  选择处理方式
-     | <----------------------------------------- |  (Skip/Replace/Merge/Append)
-     |                                            |
-     |  构建迁移计划                                 |
-     |  发送计划预览                                 |
-     | -----------------------------------------> |
-     |                                            |  确认迁移
-     |  开始传输                                    |
-     |  按模块逐项传输                               |
-     | ==========================================> |
-     |                                            |  接收并应用
-     |  完成，验证                                   |
-     | <========================================> |
+控制机或操作者工作目录
+     |
+     |  hostlift plan --source source-inventory.json --target target-inventory.json
+     |  生成 hostlift-plan.json，包含 action、risk、manual_step 和 plan hash
+     |
+     |  hostlift plan --selection
+     |  输出按个人迁移批次分组的选择清单
+     |
+     |  hostlift validate --plan hostlift-plan.json
+     |  校验 schema、风险、manual_step 和本地 policy
+     |
+     |  hostlift apply --plan hostlift-plan.json --dry-run
+     |  预览真实远程副作用
+     |
+     |  hostlift apply --plan hostlift-plan.json --source-host OLD --host NEW --approve
+     |  通过 remote/transport 边界执行已批准 action，写 audit 和 rollback manifest
+     |
+     |  hostlift audit verify / hostlift rollback
+     |  校验证据链，必要时按动作级 rollback manifest 恢复
 ```
 
-### 4.2 离线迁移
+当前架构没有常驻源端服务，也没有 `export/import` 在线握手协议。跨主机数据传输通过 `transfer` 或 `apply` 内部文件型 action 进入 `transport/*`，远程命令只能从 `remote/*` 出去。
 
-```
-源主机操作:
-  hostlift scan --output source-inventory.json
-  hostlift export --output hostlift-bundle.tar.zst
+### 4.2 离线式迁移
 
-目标主机操作:
-  hostlift scan --output target-inventory.json
-  hostlift plan --source source-inventory.json --target target-inventory.json --bundle hostlift-bundle.tar.zst
-  hostlift validate --plan hostlift-plan.json
-  hostlift apply --plan hostlift-plan.json
-```
-
-离线迁移对于受限网络和审计工作流程很重要。
-
-### 4.2 离线迁移
+当前已支持“清单离线、执行受控”的工作方式：源/目标 inventory 可以用任意安全方式带到控制机，plan 和审查不需要连接远程主机；真正复制文件时再使用 `apply --source-host` 或 `transfer --source-host`。
 
 **源主机操作：**
 ```bash
-# 扫描源主机并导出清单
-hostlift scan --output source-inventory.json
-
-# 创建离线迁移包
-hostlift export --output hostlift-bundle.tar.zst
+# 扫描源主机并保存清单
+hostlift scan --output source-inventory.json --summary --force
 ```
 
 **目标主机操作：**
 ```bash
 # 扫描目标主机
-hostlift scan --output target-inventory.json
+hostlift scan --output target-inventory.json --summary --force
+```
 
+**控制机操作：**
+```bash
 # 生成迁移计划
 hostlift plan \
   --source source-inventory.json \
   --target target-inventory.json \
-  --bundle hostlift-bundle.tar.zst
+  --output hostlift-plan.json \
+  --summary \
+  --force
 
 # 验证迁移计划
-hostlift validate --plan hostlift-plan.json
+hostlift validate --plan hostlift-plan.json --summary
 
-# 应用迁移计划
-hostlift apply --plan hostlift-plan.json
+# 源机推目标机复制文件型 action
+hostlift apply \
+  --plan hostlift-plan.json \
+  --source-host root@OLD \
+  --host root@NEW \
+  --transfer-transport rsync \
+  --approve
 ```
 
-离线迁移对于受限网络和审计工作流程很重要。
+真正的离线 bundle、对象存储 staging 或常驻 agent 可以作为后续增强，但不属于当前个人迁移默认主线。
 
 ## 5. 数据模型
 
@@ -670,7 +656,7 @@ find /etc/systemd/system -type f
 1. 迁移自定义单元和覆盖
 2. 如果可能，验证引用的路径
 3. 仅在单元验证后启用服务
-4. 对源端运行中、目标端未运行的 service 生成 high-risk manual_step，不自动 start/restart
+4. 对源端运行中、目标端未运行的 service 生成 `services/review-start/<unit>` 和 `services/check-status/<unit>` 高风险人工步骤，默认不自动启动服务
 ```
 
 验证器：
