@@ -26,6 +26,14 @@ pub fn applySupportForAction(action: plan.Action) ?ApplySupport {
         .create_user,
         .start_compose_project,
         .verify_compose_project,
+        .postgresql_dump,
+        .postgresql_target_baseline,
+        .postgresql_transfer,
+        .postgresql_restore,
+        .postgresql_verify,
+        .reinstall_download,
+        .reinstall_execute,
+        .reinstall_verify,
         => .handler,
 
         .copy_data_path,
@@ -44,6 +52,7 @@ pub fn applySupportForAction(action: plan.Action) ?ApplySupport {
 
 // 在 approved apply 前校验 action 已属于注册模块且当前 executor 支持。
 pub fn ensureApplySupported(action: plan.Action) !ApplySupport {
-    if (findForAction(action) == null) return error.UnsupportedApplyModule;
+    const module_handler = findForAction(action) orelse return error.UnsupportedApplyModule;
+    if (module_handler.apply == null) return error.UnsupportedApplyAction;
     return applySupportForAction(action) orelse error.UnsupportedApplyAction;
 }

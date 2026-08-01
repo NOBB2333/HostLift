@@ -10,6 +10,10 @@ pub const ManualStepInput = struct {
     module: plan.ModuleName,
     risk: plan.RiskLevel,
     description: []const u8,
+    task_provider: ?[]const u8 = null,
+    task_inputs: []const common.ManualInputSpec = &.{},
+    task_secret_refs: []const []const u8 = &.{},
+    task_verify_probes: ?[]const common.ManualProbeSpec = null,
 };
 
 // 追加一条需要人工处理的高风险动作。
@@ -27,5 +31,11 @@ pub fn appendManualStep(
         .risk = input.risk,
         .requires_confirmation = true,
         .description = input.description,
+        .manual_task_spec = .{
+            .provider = input.task_provider,
+            .inputs = input.task_inputs,
+            .secret_refs = input.task_secret_refs,
+            .verify_probes = input.task_verify_probes,
+        },
     });
 }

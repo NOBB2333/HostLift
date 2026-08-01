@@ -44,4 +44,5 @@ pub const HostInfo = struct {
 pub const ScanMetadata = struct {
     scanned_at_unix: i64,
     warnings: [][]const u8,
+    full_scan: ?bool = null,
 };

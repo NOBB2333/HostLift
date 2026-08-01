@@ -19,6 +19,9 @@ pub const Parsed = struct {
     audit_log_output_path: ?[]const u8 = null,
     audit_sink_target: ?audit_sink.Target = null,
     audit_mirror_log_path: ?[]const u8 = null,
+    rollback_manifest_path: ?[]const u8 = null,
+    run_state_path: ?[]const u8 = null,
+    resume_run_state_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
     host_authz_path: ?[]const u8 = null,
     apply_options: apply_executor.Options = .{},
@@ -82,6 +85,21 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) !Parsed {
             const result = try common_options.parseAuditMirrorLog(args, index);
             index = result.next_index;
             parsed.audit_mirror_log_path = result.value;
+        } else if (std.mem.eql(u8, arg, "--rollback-manifest")) {
+            const result = try common_options.requireValue(args, index, error.MissingRollbackManifestPath);
+            index = result.next_index;
+            if (result.value.len == 0) return error.InvalidRollbackManifestPath;
+            parsed.rollback_manifest_path = result.value;
+        } else if (std.mem.eql(u8, arg, "--run-state")) {
+            const result = try common_options.requireValue(args, index, error.MissingRunStatePath);
+            index = result.next_index;
+            if (result.value.len == 0) return error.InvalidRunStatePath;
+            parsed.run_state_path = result.value;
+        } else if (std.mem.eql(u8, arg, "--resume-run")) {
+            const result = try common_options.requireValue(args, index, error.MissingRunStatePath);
+            index = result.next_index;
+            if (result.value.len == 0) return error.InvalidRunStatePath;
+            parsed.resume_run_state_path = result.value;
         } else if (std.mem.eql(u8, arg, "--policy")) {
             const result = try common_options.requireValue(args, index, error.MissingPolicyPath);
             index = result.next_index;
@@ -129,6 +147,13 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) !Parsed {
             if (index >= args.len) return error.MissingTransferBandwidthLimit;
             parsed.apply_options.transfer_bandwidth_limit_kbps = try std.fmt.parseUnsigned(u32, args[index], 10);
             if (parsed.apply_options.transfer_bandwidth_limit_kbps.? == 0) return error.InvalidTransferBandwidthLimit;
+        } else if (std.mem.eql(u8, arg, "--no-transfer-manifest-verify")) {
+            parsed.apply_options.transfer_manifest_verify = false;
+        } else if (std.mem.eql(u8, arg, "--transfer-manifest-max-entries")) {
+            index += 1;
+            if (index >= args.len) return error.MissingTransferManifestMaxEntries;
+            parsed.apply_options.transfer_manifest_max_entries = try std.fmt.parseUnsigned(usize, args[index], 10);
+            if (parsed.apply_options.transfer_manifest_max_entries == 0) return error.InvalidTransferManifestMaxEntries;
         } else if (std.mem.eql(u8, arg, "--include-module")) {
             index += 1;
             if (index >= args.len) return error.MissingFilterValue;
@@ -152,6 +177,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) !Parsed {
 
     if (!parsed.dry_run and !parsed.approve) return error.ApplyRequiresDryRunOrApprove;
     if (parsed.dry_run and parsed.approve) return error.ApplyModeConflict;
+    if (parsed.run_state_path != null and parsed.resume_run_state_path != null) return error.RunStateModeConflict;
+    if (parsed.dry_run and (parsed.run_state_path != null or parsed.resume_run_state_path != null)) return error.RunStateRequiresApprove;
     try common_options.validateAuditOptions(.{
         .log_output_path = parsed.audit_log_output_path,
         .sink_target = parsed.audit_sink_target,
@@ -197,6 +224,20 @@ test "apply options parser accepts transfer bandwidth limit" {
     try std.testing.expectEqual(@as(?u32, 4096), parsed.apply_options.transfer_bandwidth_limit_kbps);
 }
 
+test "apply options parser controls recursive transfer manifest verification" {
+    var defaults = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run" });
+    defer defaults.deinit(std.testing.allocator);
+    try std.testing.expect(defaults.apply_options.transfer_manifest_verify);
+    try std.testing.expectEqual(@as(usize, 100_000), defaults.apply_options.transfer_manifest_max_entries);
+
+    var configured = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--no-transfer-manifest-verify", "--transfer-manifest-max-entries", "4096" });
+    defer configured.deinit(std.testing.allocator);
+    try std.testing.expect(!configured.apply_options.transfer_manifest_verify);
+    try std.testing.expectEqual(@as(usize, 4096), configured.apply_options.transfer_manifest_max_entries);
+
+    try std.testing.expectError(error.InvalidTransferManifestMaxEntries, parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--transfer-manifest-max-entries", "0" }));
+}
+
 test "apply options parser accepts approval receipt key env" {
     var parsed = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--approval-receipt", "/tmp/receipt.json", "--approval-receipt-key-env", "HOSTLIFT_APPROVAL_KEY" });
     defer parsed.deinit(std.testing.allocator);
@@ -208,6 +249,34 @@ test "apply options parser accepts audit mirror with remote sink" {
     var parsed = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--audit-sink", "https://audit.example.test/events", "--audit-mirror-log", "/tmp/audit-mirror.jsonl" });
     defer parsed.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("/tmp/audit-mirror.jsonl", parsed.audit_mirror_log_path.?);
+}
+
+test "apply options parser accepts explicit rollback manifest path" {
+    var parsed = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--rollback-manifest", "./rollback-run.jsonl" });
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("./rollback-run.jsonl", parsed.rollback_manifest_path.?);
+}
+
+test "apply options parser rejects missing rollback manifest path" {
+    try std.testing.expectError(
+        error.MissingRollbackManifestPath,
+        parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--rollback-manifest" }),
+    );
+}
+
+test "apply options parser accepts new and resumed run state modes" {
+    var fresh = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--approve", "--run-state", "/tmp/run.jsonl" });
+    defer fresh.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/tmp/run.jsonl", fresh.run_state_path.?);
+
+    var resumed = try parse(std.testing.allocator, &.{ "--plan", "plan.json", "--approve", "--resume-run", "/tmp/run.jsonl" });
+    defer resumed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/tmp/run.jsonl", resumed.resume_run_state_path.?);
+}
+
+test "apply options parser rejects conflicting or dry run state modes" {
+    try std.testing.expectError(error.RunStateModeConflict, parse(std.testing.allocator, &.{ "--plan", "plan.json", "--approve", "--run-state", "/tmp/new.jsonl", "--resume-run", "/tmp/old.jsonl" }));
+    try std.testing.expectError(error.RunStateRequiresApprove, parse(std.testing.allocator, &.{ "--plan", "plan.json", "--dry-run", "--resume-run", "/tmp/run.jsonl" }));
 }
 
 test "apply options parser rejects audit mirror without remote sink" {

@@ -30,6 +30,8 @@ test {
     _ = @import("cli/apply_options.zig");
     _ = @import("cli/apply_policy.zig");
     _ = @import("cli/common_options.zig");
+    _ = @import("cli/evidence.zig");
+    _ = @import("cli/evidence_probe.zig");
     _ = @import("cli/manifest.zig");
     _ = @import("cli/plan.zig");
     _ = @import("cli/remote.zig");
@@ -64,6 +66,7 @@ test {
     _ = @import("apply/handler.zig");
     _ = @import("apply/preflight.zig");
     _ = @import("apply/preflight_tests.zig");
+    _ = @import("apply/run_state.zig");
     _ = @import("apply/rollback_entries.zig");
     _ = @import("apply/action/common.zig");
     _ = @import("apply/action/packages.zig");
@@ -95,6 +98,12 @@ test {
     _ = @import("manifest/local.zig");
     _ = @import("manifest/schema.zig");
     _ = @import("manifest/verify.zig");
+    _ = @import("manual_evidence/schema.zig");
+    _ = @import("manual_evidence/completeness.zig");
+    _ = @import("manual_evidence/ledger.zig");
+    _ = @import("manual_evidence/probe_schema.zig");
+    _ = @import("manual_evidence/probed_validator.zig");
+    _ = @import("manual_evidence/validator.zig");
     _ = @import("modules/apply_support.zig");
     _ = @import("modules/handler.zig");
     _ = @import("modules/handlers/command.zig");
@@ -108,11 +117,16 @@ test {
     _ = @import("modules/scan_registry.zig");
     _ = @import("plan/schema.zig");
     _ = @import("plan/compatibility.zig");
+    _ = @import("plan/action_compatibility.zig");
     _ = @import("plan/builder.zig");
     _ = @import("plan/builder_tests.zig");
     _ = @import("plan/filter.zig");
     _ = @import("plan/filter_match.zig");
+    _ = @import("plan/dag.zig");
     _ = @import("plan/hash.zig");
+    _ = @import("plan/workload_schema.zig");
+    _ = @import("plan/workloads.zig");
+    _ = @import("plan/workloads_tests.zig");
     _ = @import("plan/rules.zig");
     _ = @import("plan/modules/appdata.zig");
     _ = @import("plan/modules/common.zig");
@@ -141,6 +155,7 @@ test {
     _ = @import("remote/schema.zig");
     _ = @import("remote/session.zig");
     _ = @import("remote/planner.zig");
+    _ = @import("remote/manual_probe.zig");
     _ = @import("remote/probe.zig");
     _ = @import("remote/options.zig");
     _ = @import("remote/operation_state.zig");

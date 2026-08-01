@@ -171,6 +171,19 @@ fn hasAction(actions: []const plan.Action, id_prefix: []const u8, name: []const 
 fn appendReinstallStep(allocator: std.mem.Allocator, actions: *std.ArrayList(plan.Action), resource: inventory.ResourceRef) !void {
     const description = try reinstallDescription(allocator, resource);
     defer allocator.free(description);
+    var task_inputs: [9]common.ManualInputSpec = undefined;
+    var input_count: usize = 0;
+    task_inputs[input_count] = .{ .name = "artifact_path", .value = resource.path };
+    input_count += 1;
+    task_inputs[input_count] = .{ .name = "resource_kind", .value = @tagName(resource.kind) };
+    input_count += 1;
+    appendOptionalTaskInput(&task_inputs, &input_count, "sha256", resource.sha256);
+    appendOptionalTaskInput(&task_inputs, &input_count, "file_type", resource.file_type);
+    appendOptionalTaskInput(&task_inputs, &input_count, "dynamic_link_summary", resource.dynamic_link_summary);
+    appendOptionalTaskInput(&task_inputs, &input_count, "owner", resource.owner_group orelse resource.owner);
+    appendOptionalTaskInput(&task_inputs, &input_count, "mode", resource.mode);
+    appendOptionalTaskInput(&task_inputs, &input_count, "mtime", resource.mtime_unix);
+    appendOptionalTaskInput(&task_inputs, &input_count, "security_summary", resource.security_summary);
     try manual_common.appendManualStep(allocator, actions, .{
         .id_prefix = "resources/reinstall",
         .name = resource.path,
@@ -178,7 +191,20 @@ fn appendReinstallStep(allocator: std.mem.Allocator, actions: *std.ArrayList(pla
         .module = .resources,
         .risk = .high,
         .description = description,
+        .task_provider = "resource_reinstall",
+        .task_inputs = task_inputs[0..input_count],
     });
+}
+
+fn appendOptionalTaskInput(
+    inputs: *[9]common.ManualInputSpec,
+    count: *usize,
+    name: []const u8,
+    value: ?[]const u8,
+) void {
+    const present = value orelse return;
+    inputs[count.*] = .{ .name = name, .value = present, .required = false };
+    count.* += 1;
 }
 
 fn appendSecurityReviewStep(allocator: std.mem.Allocator, actions: *std.ArrayList(plan.Action), resource: inventory.ResourceRef) !void {
@@ -392,6 +418,30 @@ test "resources plan keeps install root copy but adds reinstall review" {
     try std.testing.expectEqualStrings("resources/reinstall//opt/myapp", actions.items[1].id);
 }
 
+test "resources reinstall task preserves artifact verification facts" {
+    var actions: std.ArrayList(plan.Action) = .empty;
+    defer freeTestActions(&actions);
+    var source_resources = [_]inventory.ResourceRef{.{
+        .path = "/usr/local/bin/tool",
+        .kind = .unmanaged_executable,
+        .default_action = .review,
+        .sha256 = "abcdef",
+        .file_type = "ELF 64-bit",
+        .dynamic_link_summary = "libc.so.6",
+        .owner_group = "root:root",
+        .mode = "0755",
+        .mtime_unix = "123",
+    }};
+
+    try appendActions(std.testing.allocator, &actions, .{ .resources = &source_resources }, .{});
+    const action = findTestAction(actions.items, "resources/reinstall//usr/local/bin/tool").?;
+    const task = action.manual_task.?;
+    try std.testing.expectEqualStrings("resource_reinstall", task.provider);
+    try std.testing.expectEqualStrings("abcdef", testManualInputValue(task, "sha256").?);
+    try std.testing.expectEqualStrings("libc.so.6", testManualInputValue(task, "dynamic_link_summary").?);
+    try std.testing.expectEqualStrings("root:root", testManualInputValue(task, "owner").?);
+}
+
 test "resources plan describes stateful data as backup review" {
     var actions: std.ArrayList(plan.Action) = .empty;
     defer freeTestActions(&actions);
@@ -520,13 +570,20 @@ test "resources plan reviews target-only cleanup without deleting" {
 }
 
 fn freeTestActions(actions: *std.ArrayList(plan.Action)) void {
-    for (actions.items) |action| {
-        std.testing.allocator.free(action.id);
-        std.testing.allocator.free(action.subject);
-        if (action.home) |home| std.testing.allocator.free(home);
-        if (action.shell) |shell| std.testing.allocator.free(shell);
-        if (action.owner) |owner| std.testing.allocator.free(owner);
-        std.testing.allocator.free(action.description);
-    }
+    for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
     actions.deinit(std.testing.allocator);
+}
+
+fn findTestAction(actions: []const plan.Action, id: []const u8) ?plan.Action {
+    for (actions) |action| {
+        if (std.mem.eql(u8, action.id, id)) return action;
+    }
+    return null;
+}
+
+fn testManualInputValue(task: plan.ManualTask, name: []const u8) ?[]const u8 {
+    for (task.inputs) |input| {
+        if (std.mem.eql(u8, input.name, name)) return input.value;
+    }
+    return null;
 }

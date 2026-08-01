@@ -1,6 +1,7 @@
 const std = @import("std");
 const audit_command = @import("cli/audit.zig");
 const apply_command = @import("cli/apply.zig");
+const evidence_command = @import("cli/evidence.zig");
 const help_command = @import("cli/help.zig");
 const scan_command = @import("cli/scan.zig");
 const manifest_command = @import("cli/manifest.zig");
@@ -49,6 +50,8 @@ pub fn runWithArgs(io: std.Io, allocator: std.mem.Allocator, args: []const []con
         try validate_command.run(io, allocator, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "apply")) {
         try apply_command.run(io, allocator, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "evidence")) {
+        try evidence_command.run(io, allocator, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "audit")) {
         try audit_command.run(io, allocator, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "rollback")) {

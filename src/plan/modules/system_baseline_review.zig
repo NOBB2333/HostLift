@@ -1,6 +1,7 @@
 const std = @import("std");
 const inventory = @import("../../inventory/schema.zig");
 const plan = @import("../schema.zig");
+const common = @import("common.zig");
 const manual_common = @import("manual_common.zig");
 
 // 规划系统基线差异的人工审查动作；这些项目默认不自动写入目标机。
@@ -82,13 +83,28 @@ pub fn appendActions(
     for (source.script_apps) |app| {
         if (!app.present) continue;
         if (findScriptApp(target.script_apps, app)) |_| continue;
+        var task_inputs: [8]common.ManualInputSpec = undefined;
+        var input_count: usize = 0;
+        task_inputs[input_count] = .{ .name = "install_path", .value = app.path };
+        input_count += 1;
+        task_inputs[input_count] = .{ .name = "install_kind", .value = @tagName(app.kind) };
+        input_count += 1;
+        appendOptionalTaskInput(&task_inputs, &input_count, "source_url", app.source_hint);
+        appendOptionalTaskInput(&task_inputs, &input_count, "version", app.version_hint);
+        appendOptionalTaskInput(&task_inputs, &input_count, "checksum", app.checksum_hint);
+        appendOptionalTaskInput(&task_inputs, &input_count, "config_path", app.config_hint);
+        appendOptionalTaskInput(&task_inputs, &input_count, "discovery_evidence", app.evidence);
+        task_inputs[input_count] = .{ .name = "reinstall_hint", .value = app.reinstall_hint, .required = false };
+        input_count += 1;
         try manual_common.appendManualStep(allocator, actions, .{
-            .id_prefix = "system-baseline/review-script-app",
+            .id_prefix = "system-baseline/reinstall-script-app",
             .name = app.path,
             .subject = app.name,
             .module = .system_baseline,
             .risk = .high,
             .description = app.reinstall_hint,
+            .task_provider = "script_reinstall",
+            .task_inputs = task_inputs[0..input_count],
         });
     }
 
@@ -113,6 +129,17 @@ pub fn appendActions(
             .description = "Review truncated system baseline scan results before migration",
         });
     }
+}
+
+fn appendOptionalTaskInput(
+    inputs: *[8]common.ManualInputSpec,
+    count: *usize,
+    name: []const u8,
+    value: ?[]const u8,
+) void {
+    const present = value orelse return;
+    inputs[count.*] = .{ .name = name, .value = present, .required = false };
+    count.* += 1;
 }
 
 // 检查是否已生成 /etc/hosts 写入动作，避免重复。
@@ -288,11 +315,7 @@ fn descriptionForCommand(name: []const u8) []const u8 {
 test "system baseline review creates manual step for risky source-only path" {
     var actions: std.ArrayList(plan.Action) = .empty;
     defer {
-        for (actions.items) |action| {
-            std.testing.allocator.free(action.id);
-            std.testing.allocator.free(action.subject);
-            std.testing.allocator.free(action.description);
-        }
+        for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
         actions.deinit(std.testing.allocator);
     }
 
@@ -307,4 +330,41 @@ test "system baseline review creates manual step for risky source-only path" {
     try std.testing.expectEqual(@as(usize, 1), actions.items.len);
     try std.testing.expectEqual(plan.RiskLevel.critical, actions.items[0].risk);
     try std.testing.expectEqual(plan.ModuleName.system_baseline, actions.items[0].module);
+}
+
+test "system baseline script app emits provider-specific reinstall inputs" {
+    var actions: std.ArrayList(plan.Action) = .empty;
+    defer {
+        for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
+        actions.deinit(std.testing.allocator);
+    }
+    var apps = [_]inventory.ScriptInstallCandidate{.{
+        .name = "tool",
+        .path = "/home/alice/.local/bin/tool",
+        .kind = .user_binary,
+        .present = true,
+        .source_hint = "https://example.invalid/install.sh",
+        .version_hint = "1.2.3",
+        .checksum_hint = "sha256:abc",
+        .config_hint = "/home/alice/.config/tool",
+        .reinstall_hint = "download verified artifact",
+    }};
+
+    try appendActions(std.testing.allocator, &actions, .{ .script_apps = &apps }, .{});
+    try std.testing.expectEqual(@as(usize, 1), actions.items.len);
+    try std.testing.expectEqualStrings("system-baseline/reinstall-script-app//home/alice/.local/bin/tool", actions.items[0].id);
+    const task = actions.items[0].manual_task.?;
+    try std.testing.expectEqual(plan.ManualTaskKind.reinstall, task.kind);
+    try std.testing.expectEqualStrings("script_reinstall", task.provider);
+    try std.testing.expectEqualStrings("https://example.invalid/install.sh", manualInputValue(task, "source_url").?);
+    try std.testing.expectEqualStrings("1.2.3", manualInputValue(task, "version").?);
+    try std.testing.expectEqualStrings("sha256:abc", manualInputValue(task, "checksum").?);
+    try std.testing.expectEqualStrings("/home/alice/.config/tool", manualInputValue(task, "config_path").?);
+}
+
+fn manualInputValue(task: plan.ManualTask, name: []const u8) ?[]const u8 {
+    for (task.inputs) |input| {
+        if (std.mem.eql(u8, input.name, name)) return input.value;
+    }
+    return null;
 }

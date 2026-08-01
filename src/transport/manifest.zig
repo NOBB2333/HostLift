@@ -4,6 +4,20 @@ const remote_options = @import("../remote/options.zig");
 const remote_probe = @import("remote_probe.zig");
 const validation = @import("../security/validation.zig");
 
+const remote_file_batch_size = 32;
+
+const RemoteEntryKind = struct {
+    find_kind: []const u8,
+    manifest_kind: []const u8,
+};
+
+const remote_special_kinds = [_]RemoteEntryKind{
+    .{ .find_kind = "p", .manifest_kind = "named_pipe" },
+    .{ .find_kind = "s", .manifest_kind = "unix_domain_socket" },
+    .{ .find_kind = "b", .manifest_kind = "block_device" },
+    .{ .find_kind = "c", .manifest_kind = "character_device" },
+};
+
 pub const sha256File = remote_probe.sha256File;
 pub const sha256FileWithOptions = remote_probe.sha256FileWithOptions;
 
@@ -27,9 +41,14 @@ pub fn buildRemoteWithOptions(
     max_entries: usize,
     options: remote_options.ExecutionOptions,
 ) !local_manifest.Manifest {
+    if (max_entries == 0) return error.InvalidManifestEntryLimit;
     try validation.validateHost(host);
     try validation.validatePath(root_path);
     _ = try remote_options.normalize(options);
+
+    if (!try @import("../remote/exec.zig").pathIsDirectoryWithOptions(io, allocator, host, root_path, options)) {
+        return buildRemoteSinglePath(io, allocator, host, root_path, options);
+    }
 
     var entries: std.ArrayList(local_manifest.Entry) = .empty;
     errdefer {
@@ -66,34 +85,150 @@ pub fn buildRemoteWithOptions(
     if (!truncated) {
         const files = try remote_probe.findPaths(io, allocator, host, root_path, "f", options);
         defer freeStringSlice(allocator, files);
-        for (files) |path| {
+        var offset: usize = 0;
+        while (offset < files.len and entries.items.len < max_entries) {
+            const available = max_entries - entries.items.len;
+            const batch_len = @min(@min(remote_file_batch_size, files.len - offset), available);
+            const batch = files[offset .. offset + batch_len];
+            const sizes = try remote_probe.fileSizes(io, allocator, host, batch, options);
+            defer allocator.free(sizes);
+            const hashes = try remote_probe.fileHashes(io, allocator, host, batch, options);
+            defer allocator.free(hashes);
+            for (batch, sizes, hashes) |path, size, file_hash| {
+                const relative = try relativePath(allocator, root_path, path) orelse continue;
+                errdefer allocator.free(relative);
+                const hash_text = local_manifest.hexSha256(file_hash);
+                const owned_hash = try allocator.dupe(u8, &hash_text);
+                errdefer allocator.free(owned_hash);
+                try entries.append(allocator, .{
+                    .path = relative,
+                    .kind = "file",
+                    .size = size,
+                    .sha256 = owned_hash,
+                });
+                file_count += 1;
+                total_bytes += size;
+            }
+            offset += batch_len;
+        }
+        if (offset < files.len) truncated = true;
+    }
+
+    if (!truncated) {
+        const links = try remote_probe.findPaths(io, allocator, host, root_path, "l", options);
+        defer freeStringSlice(allocator, links);
+        for (links) |path| {
             if (entries.items.len >= max_entries) {
                 truncated = true;
                 break;
             }
             const relative = try relativePath(allocator, root_path, path) orelse continue;
             errdefer allocator.free(relative);
-            const size = try remote_probe.fileSize(io, allocator, host, path, options);
-            const hash = try sha256HexAlloc(io, allocator, host, path, options);
-            errdefer allocator.free(hash);
+            const target = try remote_probe.readLinkTarget(io, allocator, host, path, options);
+            defer allocator.free(target);
+            const link_hash = try @import("../manifest/hash.zig").sha256BytesHexAlloc(allocator, target);
+            errdefer allocator.free(link_hash);
             try entries.append(allocator, .{
                 .path = relative,
-                .kind = "file",
-                .size = size,
-                .sha256 = hash,
+                .kind = "sym_link",
+                .size = target.len,
+                .sha256 = link_hash,
             });
-            file_count += 1;
-            total_bytes += size;
         }
     }
 
+    if (!truncated) {
+        for (remote_special_kinds) |kind| {
+            const paths = try remote_probe.findPaths(io, allocator, host, root_path, kind.find_kind, options);
+            defer freeStringSlice(allocator, paths);
+            for (paths) |path| {
+                if (entries.items.len >= max_entries) {
+                    truncated = true;
+                    break;
+                }
+                const relative = try relativePath(allocator, root_path, path) orelse continue;
+                errdefer allocator.free(relative);
+                try entries.append(allocator, .{
+                    .path = relative,
+                    .kind = kind.manifest_kind,
+                    .size = 0,
+                    .sha256 = null,
+                });
+            }
+            if (truncated) break;
+        }
+    }
+
+    const owned_root = try allocator.dupe(u8, root_path);
+    errdefer allocator.free(owned_root);
+    const owned_entries = try entries.toOwnedSlice(allocator);
     return .{
-        .root = try allocator.dupe(u8, root_path),
-        .entries = try entries.toOwnedSlice(allocator),
+        .root = owned_root,
+        .entries = owned_entries,
         .file_count = file_count,
         .dir_count = dir_count,
         .total_bytes = total_bytes,
         .truncated = truncated,
+    };
+}
+
+fn buildRemoteSinglePath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    root_path: []const u8,
+    options: remote_options.ExecutionOptions,
+) !local_manifest.Manifest {
+    var link_argv = [_][]const u8{ "test", "-L", root_path };
+    if (try @import("../remote/exec.zig").commandSucceededWithOptions(io, allocator, host, &link_argv, options)) {
+        const target = try remote_probe.readLinkTarget(io, allocator, host, root_path, options);
+        defer allocator.free(target);
+        const link_hash = try @import("../manifest/hash.zig").sha256BytesHexAlloc(allocator, target);
+        errdefer allocator.free(link_hash);
+        const entries = try allocator.alloc(local_manifest.Entry, 1);
+        errdefer allocator.free(entries);
+        const entry_path = try allocator.dupe(u8, ".");
+        errdefer allocator.free(entry_path);
+        entries[0] = .{
+            .path = entry_path,
+            .kind = "sym_link",
+            .size = target.len,
+            .sha256 = link_hash,
+        };
+        const owned_root = try allocator.dupe(u8, root_path);
+        return .{
+            .root = owned_root,
+            .entries = entries,
+            .file_count = 0,
+            .dir_count = 0,
+            .total_bytes = 0,
+            .truncated = false,
+        };
+    }
+
+    var file_argv = [_][]const u8{ "test", "-f", root_path };
+    if (!try @import("../remote/exec.zig").commandSucceededWithOptions(io, allocator, host, &file_argv, options)) return error.UnsupportedRemoteManifestRoot;
+    const size = try remote_probe.fileSize(io, allocator, host, root_path, options);
+    const file_hash = try sha256HexAlloc(io, allocator, host, root_path, options);
+    errdefer allocator.free(file_hash);
+    const entries = try allocator.alloc(local_manifest.Entry, 1);
+    errdefer allocator.free(entries);
+    const entry_path = try allocator.dupe(u8, ".");
+    errdefer allocator.free(entry_path);
+    entries[0] = .{
+        .path = entry_path,
+        .kind = "file",
+        .size = size,
+        .sha256 = file_hash,
+    };
+    const owned_root = try allocator.dupe(u8, root_path);
+    return .{
+        .root = owned_root,
+        .entries = entries,
+        .file_count = 1,
+        .dir_count = 0,
+        .total_bytes = size,
+        .truncated = false,
     };
 }
 

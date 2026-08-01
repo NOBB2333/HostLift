@@ -78,11 +78,7 @@ fn optionalStringEqual(left: ?[]const u8, right: ?[]const u8) bool {
 test "network review creates health check for missing listener" {
     var actions: std.ArrayList(plan.Action) = .empty;
     defer {
-        for (actions.items) |action| {
-            std.testing.allocator.free(action.id);
-            std.testing.allocator.free(action.subject);
-            std.testing.allocator.free(action.description);
-        }
+        for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
         actions.deinit(std.testing.allocator);
     }
 

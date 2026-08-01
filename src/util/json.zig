@@ -1,6 +1,7 @@
 const std = @import("std");
 const inventory = @import("../inventory/schema.zig");
 const plan = @import("../plan/schema.zig");
+const workload_schema = @import("../plan/workload_schema.zig");
 const plan_validator = @import("../plan/validator.zig");
 const remote = @import("../remote/schema.zig");
 
@@ -15,6 +16,15 @@ pub fn writeInventory(writer: anytype, value: inventory.Inventory) !void {
 
 // 将迁移计划按稳定的缩进 JSON 输出。
 pub fn writePlan(writer: anytype, value: plan.MigrationPlan) !void {
+    try std.json.Stringify.value(value, .{
+        .whitespace = .indent_2,
+        .emit_null_optional_fields = true,
+    }, writer);
+    try writer.writeByte('\n');
+}
+
+// 将工作负载迁移完成度报告输出为机器可读 JSON。
+pub fn writeWorkloadReport(writer: anytype, value: workload_schema.Report) !void {
     try std.json.Stringify.value(value, .{
         .whitespace = .indent_2,
         .emit_null_optional_fields = true,

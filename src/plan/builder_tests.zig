@@ -2,6 +2,7 @@ const std = @import("std");
 const inventory = @import("../inventory/schema.zig");
 const plan = @import("schema.zig");
 const builder = @import("builder.zig");
+const validator = @import("validator.zig");
 
 test "builder creates package and service actions for missing target state" {
     var source_explicit = [_][]const u8{ "nginx", "git" };
@@ -27,6 +28,8 @@ test "builder creates package and service actions for missing target state" {
     defer migration_plan.deinit(std.testing.allocator);
 
     try std.testing.expect(migration_plan.compatibility.compatible);
+    try std.testing.expectEqualStrings(plan.schema_version_v2, migration_plan.schema_version);
+    try std.testing.expect(validator.validate(migration_plan).valid);
     try std.testing.expectEqual(@as(usize, 5), migration_plan.actions.len);
     try std.testing.expect(hasAction(migration_plan.actions, .install_package, "packages/install/nginx"));
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "packages/review-held/nginx"));
@@ -34,8 +37,21 @@ test "builder creates package and service actions for missing target state" {
     try std.testing.expect(hasAction(migration_plan.actions, .install_systemd_unit, "services/install-unit/app.service"));
     try std.testing.expect(hasAction(migration_plan.actions, .enable_systemd_unit, "services/enable/app.service"));
     for (migration_plan.actions) |action| {
+        if (std.mem.eql(u8, action.id, "packages/review-held/nginx")) {
+            const task = action.manual_task.?;
+            try std.testing.expectEqual(plan.ManualTaskKind.review, task.kind);
+            try std.testing.expectEqualStrings("packages", task.provider);
+            try std.testing.expectEqualStrings("nginx", task.inputs[0].value.?);
+            try std.testing.expectEqualStrings("review_decision", task.expected_outputs[0].name);
+            try std.testing.expectEqualStrings("hostlift.manual_evidence.v1", task.evidence_schema);
+        }
         if (std.mem.eql(u8, action.id, "services/install-unit/app.service")) {
             try std.testing.expectEqualStrings("/etc/systemd/system/app.service", action.subject);
+            try std.testing.expectEqual(plan.ActionPhase.transfer, action.phase.?);
+        }
+        if (std.mem.eql(u8, action.id, "services/enable/app.service")) {
+            try std.testing.expectEqualStrings("services/install-unit/app.service", action.depends_on.?[0]);
+            try std.testing.expectEqual(plan.ActionPhase.configure, action.phase.?);
         }
     }
 }
@@ -73,6 +89,7 @@ test "builder creates user ssh cron and config review actions" {
             try std.testing.expectEqual(@as(?u32, 1001), action.gid);
             try std.testing.expectEqualStrings("/home/deploy", action.home.?);
             try std.testing.expectEqualStrings("/bin/bash", action.shell.?);
+            try std.testing.expectEqualStrings("users/create-group/deploy", action.depends_on.?[0]);
         }
         if (action.action_type == .create_group) {
             try std.testing.expectEqual(@as(?u32, 1001), action.gid);
@@ -554,7 +571,7 @@ test "builder creates selective home config copy actions" {
     }
 }
 
-test "builder does not create actions when inventories are incompatible" {
+test "builder keeps package actions across distro versions when package manager matches" {
     var source_explicit = [_][]const u8{"nginx"};
     var source = fixture(.{
         .packages = .{ .explicit = source_explicit[0..], .held = &.{} },
@@ -566,7 +583,69 @@ test "builder does not create actions when inventories are incompatible" {
     defer migration_plan.deinit(std.testing.allocator);
 
     try std.testing.expect(!migration_plan.compatibility.compatible);
-    try std.testing.expectEqual(@as(usize, 0), migration_plan.actions.len);
+    try std.testing.expect(hasAction(migration_plan.actions, .install_package, "packages/install/nginx"));
+    try std.testing.expect(validator.validate(migration_plan).valid);
+}
+
+test "builder keeps portable data and converts distro-bound config to manual review" {
+    var source_configs = [_]inventory.ConfigFile{.{ .path = "/etc/nginx/nginx.conf", .present = true, .size = 10 }};
+    var source_projects = [_]inventory.ProjectRef{.{
+        .root = "/srv/app",
+        .kind = .node,
+        .manifest_path = "/srv/app/package.json",
+    }};
+    var source_paths = [_]inventory.DataPath{.{ .path = "/srv/data", .present = true, .kind = .app_data, .size = 10 }};
+    var source = fixture(.{
+        .configs = .{ .files = source_configs[0..] },
+        .projects = .{ .projects = source_projects[0..], .truncated = false },
+        .appdata = .{ .paths = source_paths[0..] },
+    });
+    source.distro.version_id = "22.04";
+    const target = fixture(.{});
+
+    var migration_plan = try builder.build(std.testing.allocator, source, target, 0);
+    defer migration_plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(!migration_plan.compatibility.compatible);
+    try std.testing.expect(hasAction(migration_plan.actions, .copy_project_path, "projects/copy//srv/app"));
+    try std.testing.expect(hasAction(migration_plan.actions, .copy_data_path, "appdata/copy//srv/data"));
+    try std.testing.expect(!hasAction(migration_plan.actions, .write_file, "configs/write//etc/nginx/nginx.conf"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "compatibility/review/configs/write//etc/nginx/nginx.conf"));
+    try std.testing.expect(validator.validate(migration_plan).valid);
+}
+
+test "builder blocks package and resource copies when provider and architecture differ" {
+    var source_packages = [_][]const u8{"nginx"};
+    var source_resources = [_]inventory.ResourceRef{.{
+        .path = "/opt/myapp",
+        .directory = true,
+        .kind = .install_root,
+        .default_action = .copy,
+    }};
+    const source = fixture(.{
+        .packages = .{ .explicit = source_packages[0..], .held = &.{} },
+        .resources = .{ .resources = source_resources[0..] },
+    });
+    var target = fixture(.{});
+    target.distro.id = "fedora";
+    target.distro.version_id = "42";
+    target.package_manager.kind = .dnf;
+    target.host.arch = .aarch64;
+
+    var migration_plan = try builder.build(std.testing.allocator, source, target, 0);
+    defer migration_plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(!migration_plan.compatibility.compatible);
+    try std.testing.expect(!hasAction(migration_plan.actions, .install_package, "packages/install/nginx"));
+    try std.testing.expect(!hasAction(migration_plan.actions, .copy_data_path, "resources/copy//opt/myapp"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "compatibility/review/packages/install/nginx"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "compatibility/review/resources/copy//opt/myapp"));
+    for (migration_plan.actions) |action| {
+        if (!std.mem.eql(u8, action.id, "compatibility/review/resources/copy//opt/myapp")) continue;
+        try std.testing.expectEqualStrings("compatibility_review", action.manual_task.?.provider);
+        try std.testing.expectEqualStrings("same_arch", manualInputValue(action.manual_task.?, "required_compatibility").?);
+    }
+    try std.testing.expect(validator.validate(migration_plan).valid);
 }
 
 test "builder creates app data copy actions and dump review for database paths" {
@@ -600,8 +679,79 @@ test "builder creates app data copy actions and dump review for database paths" 
             try std.testing.expect(std.mem.indexOf(u8, action.description, "dump") != null);
             try std.testing.expect(std.mem.indexOf(u8, action.description, "mysqldump") != null);
             try std.testing.expect(std.mem.indexOf(u8, action.description, "mysql/mariadb") != null);
+            const task = action.manual_task.?;
+            try std.testing.expectEqual(plan.ManualTaskKind.data_restore, task.kind);
+            try std.testing.expectEqualStrings("appdata_restore", task.provider);
+            try std.testing.expectEqualStrings("mysql/mariadb", manualInputValue(task, "engine").?);
+            try std.testing.expectEqualStrings("mysqldump --single-transaction --all-databases > mysql-all.sql", manualInputValue(task, "dump_command_hint").?);
+            try std.testing.expectEqualStrings("mysql < mysql-all.sql", manualInputValue(task, "restore_command_hint").?);
+            try std.testing.expectEqualStrings("stop writes before restore", manualInputValue(task, "consistency_requirement").?);
         }
     }
+}
+
+test "builder keeps PostgreSQL stateful review when target data directory merely exists" {
+    var source_paths = [_]inventory.DataPath{.{
+        .path = "/var/lib/postgresql",
+        .present = true,
+        .kind = .database_data,
+        .size = 1,
+        .engine_hint = "postgresql",
+    }};
+    var target_paths = [_]inventory.DataPath{.{
+        .path = "/var/lib/postgresql",
+        .present = true,
+        .kind = .database_data,
+        .size = 1,
+        .engine_hint = "postgresql",
+    }};
+    const source = fixture(.{ .appdata = .{ .paths = &source_paths } });
+    const target = fixture(.{ .appdata = .{ .paths = &target_paths } });
+
+    var migration_plan = try builder.build(std.testing.allocator, source, target, 0);
+    defer migration_plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "appdata/dump-restore//var/lib/postgresql"));
+}
+
+test "builder emits validated PostgreSQL provider dag only with explicit writers stopped acknowledgement" {
+    var source_paths = [_]inventory.DataPath{.{
+        .path = "/var/lib/postgresql",
+        .present = true,
+        .kind = .database_data,
+        .size = 1,
+        .engine_hint = "postgresql",
+    }};
+    const source = fixture(.{ .appdata = .{ .paths = &source_paths } });
+    const target = fixture(.{});
+
+    try std.testing.expectError(
+        error.PostgresqlWritersStoppedAcknowledgementRequired,
+        builder.buildWithOptions(std.testing.allocator, source, target, 0, .{ .postgresql_auto = true }),
+    );
+    try std.testing.expectError(
+        error.PostgresqlAutoProviderRequired,
+        builder.buildWithOptions(std.testing.allocator, source, target, 0, .{ .postgresql_writers_stopped = true }),
+    );
+
+    var migration_plan = try builder.buildWithOptions(std.testing.allocator, source, target, 0, .{
+        .postgresql_auto = true,
+        .postgresql_writers_stopped = true,
+    });
+    defer migration_plan.deinit(std.testing.allocator);
+
+    try std.testing.expect(!hasAction(migration_plan.actions, .manual_step, "appdata/dump-restore//var/lib/postgresql"));
+    try std.testing.expect(hasAction(migration_plan.actions, .postgresql_dump, "appdata/postgresql-dump/cluster"));
+    try std.testing.expect(hasAction(migration_plan.actions, .postgresql_target_baseline, "appdata/postgresql-target-baseline/cluster"));
+    try std.testing.expect(hasAction(migration_plan.actions, .postgresql_transfer, "appdata/postgresql-transfer/cluster"));
+    try std.testing.expect(hasAction(migration_plan.actions, .postgresql_restore, "appdata/postgresql-restore/cluster"));
+    try std.testing.expect(hasAction(migration_plan.actions, .postgresql_verify, "appdata/postgresql-verify/cluster"));
+    try std.testing.expect(validator.validate(migration_plan).valid);
+
+    const original_subject = migration_plan.actions[0].subject;
+    migration_plan.actions[0].subject = "/var/lib/hostlift/artifacts/postgresql/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    try std.testing.expect(!validator.validate(migration_plan).valid);
+    migration_plan.actions[0].subject = original_subject;
 }
 
 test "builder creates project copy actions with higher risk for compose projects" {
@@ -629,12 +779,17 @@ test "builder creates project copy actions with higher risk for compose projects
     for (migration_plan.actions) |action| {
         if (std.mem.eql(u8, action.id, "projects/copy//srv/app")) {
             try std.testing.expectEqual(plan.RiskLevel.high, action.risk);
+            try std.testing.expectEqual(plan.ActionPhase.transfer, action.phase.?);
         }
         if (std.mem.eql(u8, action.id, "projects/compose-up//srv/app")) {
             try std.testing.expectEqualStrings("/srv/app/docker-compose.yml", action.subject);
+            try std.testing.expectEqualStrings("projects/copy//srv/app", action.depends_on.?[0]);
+            try std.testing.expectEqual(plan.ActionPhase.start, action.phase.?);
         }
         if (std.mem.eql(u8, action.id, "projects/compose-verify//srv/app")) {
             try std.testing.expectEqualStrings("/srv/app/docker-compose.yml", action.subject);
+            try std.testing.expectEqualStrings("projects/compose-up//srv/app", action.depends_on.?[0]);
+            try std.testing.expectEqual(plan.ActionPhase.verify, action.phase.?);
         }
     }
 }
@@ -750,6 +905,18 @@ test "builder creates manual review actions for container runtime facts" {
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/review-network/app-net"));
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/review-compose//srv/app"));
     try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/review-container/app"));
+    try std.testing.expect(hasAction(migration_plan.actions, .manual_step, "docker/check-container/app"));
+    for (migration_plan.actions) |action| {
+        if (!std.mem.eql(u8, action.id, "docker/check-container/app")) continue;
+        const task = action.manual_task.?;
+        try std.testing.expectEqual(plan.ManualTaskKind.health_check, task.kind);
+        try std.testing.expectEqual(plan.ActionPhase.verify, action.phase.?);
+        try std.testing.expectEqualStrings("container_status", task.provider);
+        try std.testing.expectEqual(plan.ManualProbeKind.container, task.verify_probes[0].kind);
+        try std.testing.expectEqualStrings("docker:app", task.verify_probes[0].target);
+        try std.testing.expectEqualStrings("docker", task.inputs[1].value.?);
+        try std.testing.expectEqualStrings("app", task.inputs[2].value.?);
+    }
 }
 
 test "builder upgrades critical scan warnings to manual actions" {
@@ -786,6 +953,13 @@ fn hasAction(actions: []const plan.Action, action_type: plan.ActionType, id: []c
     return false;
 }
 
+fn manualInputValue(task: plan.ManualTask, name: []const u8) ?[]const u8 {
+    for (task.inputs) |input| {
+        if (std.mem.eql(u8, input.name, name)) return input.value;
+    }
+    return null;
+}
+
 const FixtureOverrides = struct {
     packages: inventory.PackageInventory = .{ .explicit = &.{}, .held = &.{} },
     services: inventory.ServiceInventory = .{ .init_system = "unknown", .units = &.{} },
@@ -802,6 +976,7 @@ const FixtureOverrides = struct {
     acl: inventory.AclInventory = .{ .getfacl_available = false, .paths = &.{}, .truncated = false },
     security_policy: inventory.SecurityPolicyInventory = .{},
     storage: inventory.StorageInventory = .{ .fstab_entries = &.{}, .mounts = &.{}, .truncated = false },
+    resources: inventory.ResourceInventory = .{},
 };
 
 // 测试辅助：构造可覆盖部分字段的 inventory。
@@ -844,6 +1019,7 @@ fn fixture(overrides: FixtureOverrides) inventory.Inventory {
             .firewall = overrides.firewall,
             .storage = overrides.storage,
             .security_policy = overrides.security_policy,
+            .resources = overrides.resources,
         },
         .scan = .{
             .scanned_at_unix = 0,

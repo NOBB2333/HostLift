@@ -1,5 +1,6 @@
 const std = @import("std");
 const remote_planner = @import("../remote/planner.zig");
+const postgresql_artifacts = @import("../postgresql/artifacts.zig");
 
 pub const schema_version = "hostlift.rollback.v1";
 
@@ -21,6 +22,16 @@ pub fn validateEntry(entry: Entry) !void {
     try remote_planner.validateHost(entry.host);
     try validateToken(entry.action_id);
     try validateToken(entry.action_type);
+
+    if (std.mem.eql(u8, entry.action_type, "postgresql_manual_recovery")) {
+        if (entry.original_path.len != 0) return error.InvalidRollbackManifestEntry;
+        try remote_planner.validatePath(entry.backup_path);
+        if (!std.mem.endsWith(u8, entry.backup_path, "/" ++ postgresql_artifacts.target_baseline_name)) return error.InvalidRollbackManifestEntry;
+        const root = entry.backup_path[0 .. entry.backup_path.len - 1 - postgresql_artifacts.target_baseline_name.len];
+        postgresql_artifacts.validateRoot(root) catch return error.InvalidRollbackManifestEntry;
+        try validateSha256Subject(entry.subject);
+        return;
+    }
 
     if (std.mem.eql(u8, entry.action_type, "delete_created_path")) {
         try remote_planner.validatePath(entry.original_path);
@@ -56,6 +67,14 @@ pub fn validateEntry(entry: Entry) !void {
     }
 
     return error.InvalidRollbackManifestEntry;
+}
+
+fn validateSha256Subject(value: []const u8) !void {
+    const prefix = "sha256:";
+    if (!std.mem.startsWith(u8, value, prefix) or value.len != prefix.len + 64) return error.InvalidRollbackManifestEntry;
+    for (value[prefix.len..]) |byte| {
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.InvalidRollbackManifestEntry;
+    }
 }
 
 fn validateCreatedPathBaseline(value: []const u8) !void {

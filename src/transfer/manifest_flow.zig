@@ -68,7 +68,7 @@ pub fn verifyRemoteIfRequested(
     );
     defer actual.deinit(allocator);
 
-    const report = local_manifest.verify(expected, actual);
+    const report = try local_manifest.verify(allocator, expected, actual);
     try local_manifest.writeVerificationSummary(stdout, report);
     if (!report.valid) return error.RemoteManifestVerificationFailed;
 }

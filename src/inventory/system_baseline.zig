@@ -6,6 +6,7 @@ const users_scanner = @import("users.zig");
 
 const max_hosts_entries = 256;
 const max_script_apps = 512;
+const redacted_system_env_value = "[REDACTED]";
 
 // 扫描系统基线事实；只记录元数据和安装痕迹，不复制高风险系统配置正文。
 pub fn scan(io: std.Io, allocator: std.mem.Allocator) !schema.SystemBaselineInventory {
@@ -535,12 +536,72 @@ fn appendConfigFact(
     key: []const u8,
     value: []const u8,
 ) !void {
+    const stored_value = if (kind == .system_env and shouldRedactSystemEnv(key, value))
+        redacted_system_env_value
+    else
+        value;
     try facts.append(allocator, .{
         .kind = kind,
         .source = try allocator.dupe(u8, source),
         .key = try allocator.dupe(u8, key),
-        .value = try allocator.dupe(u8, value),
+        .value = try allocator.dupe(u8, stored_value),
     });
+}
+
+fn shouldRedactSystemEnv(key: []const u8, value: []const u8) bool {
+    return isSensitiveEnvKey(key) or containsCredentialUrl(value);
+}
+
+fn isSensitiveEnvKey(key: []const u8) bool {
+    var tokens = std.mem.tokenizeAny(u8, key, "_-. ");
+    while (tokens.next()) |token| {
+        if (isSensitiveEnvKeyToken(token)) return true;
+    }
+    return false;
+}
+
+fn isSensitiveEnvKeyToken(token: []const u8) bool {
+    const sensitive_tokens = [_][]const u8{
+        "PASSWORD",
+        "PASSWD",
+        "PASS",
+        "PASSPHRASE",
+        "TOKEN",
+        "SECRET",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "AUTHORIZATION",
+        "KEY",
+        "APIKEY",
+        "ACCESSKEY",
+        "PRIVATEKEY",
+        "SECRETKEY",
+    };
+    for (sensitive_tokens) |candidate| {
+        if (std.ascii.eqlIgnoreCase(token, candidate)) return true;
+    }
+    return false;
+}
+
+fn containsCredentialUrl(value: []const u8) bool {
+    var search_start: usize = 0;
+    while (search_start < value.len) {
+        const scheme_offset = std.mem.indexOf(u8, value[search_start..], "://") orelse return false;
+        const authority_start = search_start + scheme_offset + 3;
+        var authority_end = authority_start;
+        while (authority_end < value.len) : (authority_end += 1) {
+            switch (value[authority_end]) {
+                '/', '?', '#', ' ', '\t', '\r', '\n' => break,
+                else => {},
+            }
+        }
+        const authority = value[authority_start..authority_end];
+        if (std.mem.indexOfScalar(u8, authority, '@')) |at| {
+            if (at > 0) return true;
+        }
+        search_start = if (authority_end > authority_start) authority_end else authority_start;
+    }
+    return false;
 }
 
 // 扫描用户 home 下的敏感路径（GnuPG、SSH 私钥）。
@@ -987,4 +1048,51 @@ test "script install helper redacts URL query and detects checksum" {
     if (std.mem.indexOfScalar(u8, found, '?')) |query| found = found[0..query];
     try std.testing.expectEqualStrings("https://example.com/install.sh", found);
     try std.testing.expect(looksLikeSha256("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+}
+
+test "system env redaction covers secret keys and credential URLs" {
+    try std.testing.expect(shouldRedactSystemEnv("DATABASE_PASSWORD", "correct-horse"));
+    try std.testing.expect(shouldRedactSystemEnv("github_token", "ghp-secret"));
+    try std.testing.expect(shouldRedactSystemEnv("OPENAI_API_KEY", "api-secret"));
+    try std.testing.expect(shouldRedactSystemEnv("AWS_ACCESSKEY", "access-secret"));
+    try std.testing.expect(shouldRedactSystemEnv("HTTPS_PROXY", "http://deploy:proxy-pass@proxy.example.test:8080"));
+    try std.testing.expect(shouldRedactSystemEnv("DATABASE_URL", "postgresql://app:db-pass@db.example.test/app"));
+}
+
+test "system env redaction preserves ordinary operational values and substring boundaries" {
+    try std.testing.expect(!shouldRedactSystemEnv("PATH", "/usr/local/bin:/usr/bin"));
+    try std.testing.expect(!shouldRedactSystemEnv("LANG", "zh_CN.UTF-8"));
+    try std.testing.expect(!shouldRedactSystemEnv("TOKENIZER_MODE", "parallel"));
+    try std.testing.expect(!shouldRedactSystemEnv("MONKEY_PATCH", "enabled"));
+    try std.testing.expect(!shouldRedactSystemEnv("SECRETARY_EMAIL", "ops@example.test"));
+    try std.testing.expect(!shouldRedactSystemEnv("DOCS_URL", "https://example.test/path@owner"));
+}
+
+test "config facts store only the redaction marker for sensitive system env" {
+    var facts: std.ArrayList(schema.SystemConfigFact) = .empty;
+    errdefer {
+        for (facts.items) |fact| {
+            std.testing.allocator.free(fact.source);
+            std.testing.allocator.free(fact.key);
+            std.testing.allocator.free(fact.value);
+        }
+        facts.deinit(std.testing.allocator);
+    }
+    try appendConfigFact(std.testing.allocator, &facts, .system_env, "/etc/environment", "API_TOKEN", "plain-secret-value");
+    try appendConfigFact(std.testing.allocator, &facts, .system_env, "/etc/environment", "PATH", "/opt/bin:/usr/bin");
+    try appendConfigFact(std.testing.allocator, &facts, .sysctl, "/etc/sysctl.conf", "TOKEN", "non-env-value");
+    const owned = try facts.toOwnedSlice(std.testing.allocator);
+    defer freeConfigFacts(std.testing.allocator, owned);
+
+    try std.testing.expectEqualStrings(redacted_system_env_value, owned[0].value);
+    try std.testing.expectEqualStrings("/opt/bin:/usr/bin", owned[1].value);
+    try std.testing.expectEqualStrings("non-env-value", owned[2].value);
+
+    var json_buffer: std.ArrayList(u8) = .empty;
+    defer json_buffer.deinit(std.testing.allocator);
+    var json_writer: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &json_buffer);
+    try std.json.Stringify.value(owned, .{}, &json_writer.writer);
+    json_buffer = json_writer.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, json_buffer.items, "plain-secret-value") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json_buffer.items, redacted_system_env_value) != null);
 }

@@ -140,13 +140,7 @@ fn appendGroupConflict(
 test "user planning emits manual step on UID conflict instead of create user" {
     var actions: std.ArrayList(plan.Action) = .empty;
     defer {
-        for (actions.items) |action| {
-            std.testing.allocator.free(action.id);
-            std.testing.allocator.free(action.subject);
-            if (action.home) |home| std.testing.allocator.free(home);
-            if (action.shell) |shell| std.testing.allocator.free(shell);
-            std.testing.allocator.free(action.description);
-        }
+        for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
         actions.deinit(std.testing.allocator);
     }
 

@@ -13,10 +13,17 @@ pub fn appendActions(
 ) !void {
     for (source.paths) |path| {
         if (!path.present) continue;
-        if (dataPathPresent(target.paths, path.path)) continue;
         if (path.kind == .database_data or path.kind == .docker_data) {
             const description = try dumpRestoreDescription(allocator, path);
             defer allocator.free(description);
+            const task_inputs = [_]common.ManualInputSpec{
+                .{ .name = "data_path", .value = path.path },
+                .{ .name = "data_kind", .value = @tagName(path.kind) },
+                .{ .name = "engine", .value = path.engine_hint orelse @tagName(path.kind) },
+                .{ .name = "dump_command_hint", .value = path.dump_hint orelse "use application-native dump, backup, or snapshot procedure" },
+                .{ .name = "restore_command_hint", .value = path.restore_hint orelse "restore with the matching application-native procedure" },
+                .{ .name = "consistency_requirement", .value = path.consistency_hint orelse "stop writes or create an application-consistent snapshot before copying files" },
+            };
             try manual_common.appendManualStep(allocator, actions, .{
                 .id_prefix = "appdata/dump-restore",
                 .name = path.path,
@@ -24,9 +31,12 @@ pub fn appendActions(
                 .module = .appdata,
                 .risk = .high,
                 .description = description,
+                .task_provider = "appdata_restore",
+                .task_inputs = &task_inputs,
             });
             continue;
         }
+        if (dataPathPresent(target.paths, path.path)) continue;
         try common.appendAction(allocator, actions, .{
             .id_prefix = "appdata/copy",
             .name = path.path,

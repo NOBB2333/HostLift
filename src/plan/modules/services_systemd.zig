@@ -63,6 +63,10 @@ fn appendServiceUnitActions(
         }
 
         if (serviceRuntimeNeedsReview(target_units, unit)) {
+            const status_probes = [_]common.ManualProbeSpec{.{
+                .kind = .systemd,
+                .target = unit.name,
+            }};
             try manual.appendManualStep(allocator, actions, .{
                 .id_prefix = "services/review-start",
                 .name = unit.name,
@@ -70,6 +74,8 @@ fn appendServiceUnitActions(
                 .module = .services,
                 .risk = .high,
                 .description = "Review whether to start this source-active service after package, config, data and dependency checks; HostLift does not start services by default",
+                .task_provider = "systemd_status",
+                .task_verify_probes = &status_probes,
             });
             try manual.appendManualStep(allocator, actions, .{
                 .id_prefix = "services/check-status",
@@ -78,6 +84,8 @@ fn appendServiceUnitActions(
                 .module = .services,
                 .risk = .high,
                 .description = "Check systemctl status, journal tail, expected ports and service-specific health after migration; HostLift reports failures without acting as a heavy gate",
+                .task_provider = "systemd_status",
+                .task_verify_probes = &status_probes,
             });
         }
     }
@@ -397,18 +405,18 @@ test "systemd plan reviews drop-ins env files and start status" {
     try std.testing.expect(hasTestAction(actions.items, "services/check-status/app.service"));
     try std.testing.expect(hasTestAction(actions.items, "services/review-drop-in//etc/systemd/system/app.service.d/override.conf"));
     try std.testing.expect(hasTestAction(actions.items, "services/review-env//etc/default/app"));
+    for (actions.items) |action| {
+        if (!std.mem.eql(u8, action.id, "services/check-status/app.service")) continue;
+        const task = action.manual_task.?;
+        try std.testing.expectEqualStrings("systemd_status", task.provider);
+        try std.testing.expectEqual(plan.ManualProbeKind.systemd, task.verify_probes[0].kind);
+        try std.testing.expectEqualStrings("app.service", task.verify_probes[0].target);
+    }
 }
 
 // 测试辅助：释放 action 列表。
 fn freeTestActions(actions: *std.ArrayList(plan.Action)) void {
-    for (actions.items) |action| {
-        std.testing.allocator.free(action.id);
-        std.testing.allocator.free(action.subject);
-        if (action.home) |home| std.testing.allocator.free(home);
-        if (action.shell) |shell| std.testing.allocator.free(shell);
-        if (action.owner) |owner| std.testing.allocator.free(owner);
-        std.testing.allocator.free(action.description);
-    }
+    for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
     actions.deinit(std.testing.allocator);
 }
 

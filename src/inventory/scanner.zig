@@ -35,6 +35,7 @@ pub fn scanLocalWithOptions(io: std.Io, allocator: std.mem.Allocator, options: S
         .scan = .{
             .scanned_at_unix = std.Io.Timestamp.now(io, .real).toSeconds(),
             .warnings = scanned_inventory.warnings,
+            .full_scan = options.filter.isEmpty(),
         },
     };
 }

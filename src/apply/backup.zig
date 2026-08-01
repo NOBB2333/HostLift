@@ -7,6 +7,8 @@ const remote_options = @import("../remote/options.zig");
 const remote_planner = @import("../remote/planner.zig");
 const rollback_manifest = @import("../rollback/manifest.zig");
 const path_util = @import("../util/paths.zig");
+const postgresql_artifacts = @import("../postgresql/artifacts.zig");
+const remote_file = @import("../transport/remote_probe.zig");
 
 // 在文件型 action 执行前准备远程备份，并写入本地 rollback 记录。
 pub fn prepareRemoteRollback(
@@ -36,6 +38,18 @@ pub fn prepareRemoteRollbackWithOptions(
     created_at: i64,
     execution_options: remote_options.ExecutionOptions,
 ) !void {
+    if (action.action_type == .postgresql_restore) {
+        try writePostgresqlRecoveryEntry(
+            io,
+            allocator,
+            action,
+            host,
+            manifest_writer,
+            created_at,
+            execution_options,
+        );
+        return;
+    }
     if (try rollback_entries.writeCommandRollbackEntry(manifest_writer, action, host, created_at)) return;
 
     if (action.action_type == .copy_data_path or action.action_type == .copy_project_path) {
@@ -63,6 +77,34 @@ pub fn prepareRemoteRollbackWithOptions(
     }
 }
 
+fn writePostgresqlRecoveryEntry(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    action: plan_schema.Action,
+    host: []const u8,
+    manifest_writer: anytype,
+    created_at: i64,
+    execution_options: remote_options.ExecutionOptions,
+) !void {
+    const baseline_path = try postgresql_artifacts.targetBaselinePath(allocator, action.subject);
+    defer allocator.free(baseline_path);
+    const size = try remote_file.fileSize(io, allocator, host, baseline_path, execution_options);
+    if (size == 0) return error.PostgresqlRecoveryBaselineEmpty;
+    const digest = try remote_file.sha256FileWithOptions(io, allocator, host, baseline_path, execution_options);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const subject = try std.fmt.allocPrint(allocator, "sha256:{s}", .{&hex});
+    defer allocator.free(subject);
+    try rollback_manifest.writeEntry(manifest_writer, .{
+        .created_at = created_at,
+        .host = host,
+        .action_id = action.id,
+        .action_type = "postgresql_manual_recovery",
+        .original_path = "",
+        .backup_path = baseline_path,
+        .subject = subject,
+    });
+}
+
 // 为 HostLift 新建的数据路径写入删除型 rollback entry，并记录成功复制后的内容摘要基线。
 pub fn writeCreatedPathRollbackEntryWithOptions(
     io: std.Io,
@@ -73,10 +115,54 @@ pub fn writeCreatedPathRollbackEntryWithOptions(
     created_at: i64,
     execution_options: remote_options.ExecutionOptions,
 ) !bool {
-    if (action.action_type != .copy_data_path and action.action_type != .copy_project_path) return false;
-    const action_subject = apply_actions.subject(action);
-    if (action_subject.len == 0) return error.MissingApplySubject;
-    const baseline = try remoteCreatedPathBaseline(io, allocator, host, action_subject, execution_options);
+    return (try writeCreatedPathRollbackEntriesWithOptions(io, allocator, action, host, manifest_writer, created_at, execution_options)) > 0;
+}
+
+// 为文件复制或可信重装创建的全部路径写 rollback baseline；不存在的失败中间态路径会跳过。
+pub fn writeCreatedPathRollbackEntriesWithOptions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    action: plan_schema.Action,
+    host: []const u8,
+    manifest_writer: anytype,
+    created_at: i64,
+    execution_options: remote_options.ExecutionOptions,
+) !usize {
+    if (action.action_type == .copy_data_path or action.action_type == .copy_project_path) {
+        const action_subject = apply_actions.subject(action);
+        if (action_subject.len == 0) return error.MissingApplySubject;
+        try writeCreatedPathEntry(io, allocator, action, host, action_subject, manifest_writer, created_at, execution_options);
+        return 1;
+    }
+    if (action.action_type == .reinstall_download) {
+        if (!try remote_exec.pathExistsWithOptions(io, allocator, host, action.subject, execution_options)) return 0;
+        try writeCreatedPathEntry(io, allocator, action, host, action.subject, manifest_writer, created_at, execution_options);
+        return 1;
+    }
+    if (action.action_type == .reinstall_execute) {
+        const spec = action.reinstall orelse return error.MissingReinstallSpec;
+        var count: usize = 0;
+        for (spec.managed_paths) |path| {
+            if (!try remote_exec.pathExistsWithOptions(io, allocator, host, path, execution_options)) continue;
+            try writeCreatedPathEntry(io, allocator, action, host, path, manifest_writer, created_at, execution_options);
+            count += 1;
+        }
+        return count;
+    }
+    return 0;
+}
+
+fn writeCreatedPathEntry(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    action: plan_schema.Action,
+    host: []const u8,
+    path: []const u8,
+    manifest_writer: anytype,
+    created_at: i64,
+    execution_options: remote_options.ExecutionOptions,
+) !void {
+    const baseline = try remoteCreatedPathBaseline(io, allocator, host, path, execution_options);
     const subject = try std.fmt.allocPrint(allocator, "stat:v1:{d}:{d}:{d}", .{ baseline.bytes, baseline.file_count, baseline.mtime_unix });
     defer allocator.free(subject);
     try rollback_manifest.writeEntry(manifest_writer, .{
@@ -84,11 +170,10 @@ pub fn writeCreatedPathRollbackEntryWithOptions(
         .host = host,
         .action_id = action.id,
         .action_type = "delete_created_path",
-        .original_path = action_subject,
+        .original_path = path,
         .backup_path = "",
         .subject = subject,
     });
-    return true;
 }
 
 const CreatedPathBaseline = struct {

@@ -18,6 +18,7 @@ pub const writeVerificationSummary = verifier.writeVerificationSummary;
 
 // 扫描本地文件或目录，生成带 SHA-256 的 manifest。
 pub fn build(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8, max_entries: usize) !Manifest {
+    if (max_entries == 0) return error.InvalidManifestEntryLimit;
     const stat = try std.Io.Dir.cwd().statFile(io, root_path, .{});
     var entries: std.ArrayList(Entry) = .empty;
     errdefer {
@@ -55,10 +56,10 @@ pub fn build(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8, ma
                 truncated = true;
                 break;
             }
-            const entry_stat = entry.dir.statFile(io, entry.basename, .{}) catch continue;
             switch (entry.kind) {
                 .file => {
-                    const file_hash = hash.sha256FileInDirHexAlloc(io, allocator, entry.dir, entry.basename) catch continue;
+                    const entry_stat = try entry.dir.statFile(io, entry.basename, .{});
+                    const file_hash = try hash.sha256FileInDirHexAlloc(io, allocator, entry.dir, entry.basename);
                     errdefer allocator.free(file_hash);
                     try entries.append(allocator, .{
                         .path = try allocator.dupe(u8, entry.path),
@@ -78,11 +79,23 @@ pub fn build(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8, ma
                     });
                     dir_count += 1;
                 },
+                .sym_link => {
+                    var link_target_buffer: [std.fs.max_path_bytes]u8 = undefined;
+                    const link_target_len = try entry.dir.readLink(io, entry.basename, &link_target_buffer);
+                    const link_hash = try hash.sha256BytesHexAlloc(allocator, link_target_buffer[0..link_target_len]);
+                    errdefer allocator.free(link_hash);
+                    try entries.append(allocator, .{
+                        .path = try allocator.dupe(u8, entry.path),
+                        .kind = "sym_link",
+                        .size = link_target_len,
+                        .sha256 = link_hash,
+                    });
+                },
                 else => {
                     try entries.append(allocator, .{
                         .path = try allocator.dupe(u8, entry.path),
                         .kind = @tagName(entry.kind),
-                        .size = entry_stat.size,
+                        .size = 0,
                         .sha256 = null,
                     });
                 },
@@ -97,9 +110,12 @@ pub fn build(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8, ma
         });
     }
 
+    const owned_root = try allocator.dupe(u8, root_path);
+    errdefer allocator.free(owned_root);
+    const owned_entries = try entries.toOwnedSlice(allocator);
     return .{
-        .root = try allocator.dupe(u8, root_path),
-        .entries = try entries.toOwnedSlice(allocator),
+        .root = owned_root,
+        .entries = owned_entries,
         .file_count = file_count,
         .dir_count = dir_count,
         .total_bytes = total_bytes,
@@ -126,4 +142,46 @@ pub fn write(writer: anytype, value: Manifest) !void {
         .emit_null_optional_fields = true,
     }, writer);
     try writer.writeByte('\n');
+}
+
+test "local manifest detects file and symlink target changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "source");
+
+    var app_file = try tmp.dir.createFile(std.testing.io, "source/app.txt", .{});
+    try app_file.writePositionalAll(std.testing.io, "alpha", 0);
+    app_file.close(std.testing.io);
+    try tmp.dir.symLink(std.testing.io, "app.txt", "source/current", .{});
+
+    const source_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/source", .{tmp.sub_path});
+    defer std.testing.allocator.free(source_path);
+    var expected = try build(std.testing.io, std.testing.allocator, source_path, 100);
+    defer expected.deinit(std.testing.allocator);
+    try verifier.ensureCompleteContent(expected);
+
+    try tmp.dir.deleteFile(std.testing.io, "source/current");
+    try tmp.dir.symLink(std.testing.io, "next.txt", "source/current", .{});
+    var actual = try build(std.testing.io, std.testing.allocator, source_path, 100);
+    defer actual.deinit(std.testing.allocator);
+    const report = try verify(std.testing.allocator, expected, actual);
+    try std.testing.expect(!report.valid);
+    try std.testing.expectEqual(@as(usize, 1), report.changed);
+}
+
+test "local manifest truncation fails complete content validation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try tmp.dir.createFile(std.testing.io, "first", .{});
+    first.close(std.testing.io);
+    var second = try tmp.dir.createFile(std.testing.io, "second", .{});
+    second.close(std.testing.io);
+
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer std.testing.allocator.free(root_path);
+    var value = try build(std.testing.io, std.testing.allocator, root_path, 1);
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expect(value.truncated);
+    try std.testing.expectError(error.ManifestTruncated, verifier.ensureCompleteContent(value));
+    try std.testing.expectError(error.InvalidManifestEntryLimit, build(std.testing.io, std.testing.allocator, root_path, 0));
 }

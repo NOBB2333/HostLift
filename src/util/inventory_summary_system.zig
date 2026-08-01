@@ -1,3 +1,4 @@
+const std = @import("std");
 const inventory = @import("../inventory/schema.zig");
 const counts = @import("inventory_summary_counts.zig");
 
@@ -286,4 +287,24 @@ pub fn writeFirewallSummary(writer: anytype, firewall: inventory.FirewallInvento
         }
         try writer.print("  - {s} ({d} bytes)\n", .{ config.path, config.size });
     }
+}
+
+test "system baseline summary preserves the redaction marker without exposing a secret" {
+    var config_facts = [_]inventory.SystemConfigFact{
+        .{
+            .kind = .system_env,
+            .source = "/etc/environment",
+            .key = "API_TOKEN",
+            .value = "[REDACTED]",
+        },
+    };
+    const baseline = inventory.SystemBaselineInventory{ .config_facts = &config_facts };
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(std.testing.allocator);
+    var output: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
+    try writeSystemBaselineSummary(&output.writer, baseline);
+    buffer = output.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "API_TOKEN=[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "plain-secret-value") == null);
 }

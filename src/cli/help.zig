@@ -7,10 +7,16 @@ pub fn print(writer: anytype) !void {
         \\  hostlift scan [--summary] [--output <path>] [--force] [--include-module <list>] [--exclude-module <list>]
         \\  hostlift manifest --path <path> [--output <path>] [--force] [--max-entries <n>]
         \\  hostlift manifest --verify <manifest.json> --path <path> [--max-entries <n>]
-        \\  hostlift plan --source <json> --target <json> [--summary|--selection|--health-report] [--output <path>] [--force] [filters]
+        \\  hostlift plan --source <json> --target <json> [--summary|--selection|--health-report|--workloads] [--postgresql-auto --postgresql-writers-stopped] [--reinstall-recipes <json>] [--output <path>] [--force] [filters]
         \\  hostlift validate --plan <json> [--policy <json>] [--summary]
+        \\  hostlift evidence validate --plan <json> --evidence <json> [--summary]
+        \\  hostlift evidence completeness --plan <json> [--evidence <json>]... [--summary]
+        \\  hostlift evidence record --plan <json> --evidence <json> --ledger <jsonl> [--summary]
+        \\  hostlift evidence verify-ledger --plan <json> --ledger <jsonl> [--summary]
+        \\  hostlift evidence probe --plan <json> --action <id> --host <user@ip> --output <json> [--identity-file <path>|--credential-provider <provider>] [--remote-timeout <seconds>] [--summary]
+        \\  hostlift evidence validate-probed --plan <json> --evidence <json> --probe-report <json> --host <user@ip> [--summary]
         \\  hostlift apply --plan <json> --dry-run [filters]
-        \\  hostlift apply --plan <json> [--source-host <user@ip>] --host <user@ip> --approve [--operator <id>] [--approval-ticket <id>] [--approval-receipt <path>] [--approval-receipt-key-env <name>] [--audit-log <path>|--audit-sink <target>] [--audit-mirror-log <path>] [--policy <json>] [--host-authz <path>] [filters] [--identity-file <path>|--credential-provider <provider>] [--remote-timeout <seconds>] [--remote-retries <n>] [--operation-id <id>] [--cancel-file <path>] [--operation-state <path>] [--transfer-transport scp|rsync|chunk] [--transfer-partial] [--transfer-resume] [--transfer-bwlimit <kbps>]
+        \\  hostlift apply --plan <json> [--source-host <user@ip>] --host <user@ip> --approve [--run-state <path>|--resume-run <path>] [--operator <id>] [--approval-ticket <id>] [--approval-receipt <path>] [--approval-receipt-key-env <name>] [--audit-log <path>|--audit-sink <target>] [--audit-mirror-log <path>] [--rollback-manifest <path>] [--policy <json>] [--host-authz <path>] [filters] [--identity-file <path>|--credential-provider <provider>] [--remote-timeout <seconds>] [--remote-retries <n>] [--operation-id <id>] [--cancel-file <path>] [--operation-state <path>] [--transfer-transport scp|rsync|chunk] [--transfer-partial] [--transfer-resume] [--transfer-bwlimit <kbps>] [--transfer-manifest-max-entries <n>] [--no-transfer-manifest-verify]
         \\  hostlift audit verify --log <jsonl> [--summary]
         \\  hostlift audit replay --log <jsonl> --audit-sink <target> [--summary]
         \\  hostlift rollback --manifest <jsonl> --dry-run [--host <user@ip>]
@@ -25,6 +31,7 @@ pub fn print(writer: anytype) !void {
         \\  manifest  生成带校验和的本地路径逐文件清单
         \\  plan      比较源/目标清单并生成迁移计划
         \\  validate  在 apply 前校验迁移计划
+        \\  evidence  校验 manual action 证据，并可执行固定只读远程探针；不授权或执行 action
         \\  apply     预览或执行已批准的迁移动作
         \\  audit     校验本地审计 JSONL hash chain
         \\  rollback  预览或按 rollback manifest 恢复备份
@@ -53,6 +60,10 @@ pub fn print(writer: anytype) !void {
         \\  --summary        打印紧凑的人类可读摘要
         \\  --selection      打印按个人迁移批次分组的可勾选 action 清单
         \\  --health-report  打印迁移后健康检查清单，不执行探测或阻断 apply
+        \\  --workloads      输出 hostlift.workload_report.v1 JSON；为防误判不允许 action 过滤
+        \\  --postgresql-auto  将 PostgreSQL 人工任务转换为固定五步逻辑迁移 provider；仅支持 PostgreSQL 10+、同主版本、root SSH 和 postgres peer 认证
+        \\  --postgresql-writers-stopped  明确确认从 dump 开始到完成前应用写入保持停止；必须和 --postgresql-auto 同时使用
+        \\  --reinstall-recipes <path>  显式可信重装 recipe JSON；仅执行 HTTPS + 固定大小/SHA-256 + 结构化 argv，不执行 scanner URL hint 或 curl 管道
         \\  --output <path>  写入文件
         \\  --force          覆盖已存在的输出文件
         \\  --include-module <list>  只保留逗号分隔模块中的动作
@@ -64,6 +75,16 @@ pub fn print(writer: anytype) !void {
         \\  --plan <path>  迁移计划 JSON
         \\  --policy <path>  action 策略 JSON；用于 allow/deny plan hash、模块、action 前缀、host/operator、审批票据/scope 和最大风险
         \\  --summary      打印紧凑的人类可读摘要
+        \\
+        \\Evidence 选项:
+        \\  validate --plan <path> --evidence <path>  校验证据与 plan SHA-256、action、provider 和 manual task 合同的绑定
+        \\  completeness --plan <path> [--evidence <path>]...  汇总全部 manual action 的缺失、重复、无效和意外证据
+        \\  record --plan <path> --evidence <path> --ledger <path>  校验后把 evidence SHA-256 追加到 plan-bound hash-chain JSONL
+        \\  verify-ledger --plan <path> --ledger <path>  校验 ledger hash chain、plan/task 绑定和缺失 manual action
+        \\  probe --plan <path> --action <id> --host <user@ip> --output <path>  执行合同内 systemd/container/TCP/HTTP 固定只读探针；输出文件拒绝覆盖
+        \\  validate-probed --plan <path> --evidence <path> --probe-report <path> --host <user@ip>  联合校验 report 原始 SHA-256、host 和逐探针结果
+        \\  --identity-file/--credential-provider/--remote-timeout  仅供 evidence probe 的 SSH 连接使用
+        \\  --summary      打印紧凑摘要；所有 evidence 命令都不会让 apply 跳过 manual_step
         \\
         \\Apply 选项:
         \\  --plan <path>  迁移计划 JSON
@@ -78,6 +99,9 @@ pub fn print(writer: anytype) !void {
         \\  --audit-log <path>      写入指定审计 JSONL 文件；默认 /tmp/hostlift-audit-<created_at>.jsonl
         \\  --audit-sink <target>   审计 sink 目标；支持 file:<path>、syslog:<facility> 和 https://...；HTTPS 通过 curl POST JSON
         \\  --audit-mirror-log <path>  使用 syslog/HTTPS sink 时同步写入本地 JSONL 镜像，便于 audit verify/replay 补发；不能和 file sink 同用
+        \\  --rollback-manifest <path>  rollback JSONL 输出路径；默认生成带随机 run 后缀的 /tmp 路径，已有文件一律拒绝覆盖
+        \\  --run-state <path>  新迁移 run 的 hash-chain JSONL；默认生成唯一 /tmp 路径，记录 plan/host/选择集合/rollback 绑定和 action 状态
+        \\  --resume-run <path>  恢复已有迁移 run；绑定不一致或状态链损坏时失败关闭，只跳过有 succeeded 证据的 action
         \\  --policy <path>  action 策略 JSON；策略不通过时拒绝 apply，可限制 plan hash/host/operator/ticket/scope
         \\  --host-authz <path>  本地主机授权 JSON；按 operator 限制可操作 host，不能替代真实身份认证/RBAC
         \\  --identity-file <path>      SSH 私钥路径；会传给 apply 内部 SSH/scp/rsync/校验/rollback 相关调用；source-host + rsync 仅用于控制机连源机，源机连目标机仍依赖源机 SSH 配置
@@ -94,6 +118,8 @@ pub fn print(writer: anytype) !void {
         \\  --transfer-partial          rsync 传输保留未完成文件，便于后续重试
         \\  --transfer-resume           rsync 传输使用 --append-verify 续传；会自动启用 --transfer-partial，不能和 scp 一起使用
         \\  --transfer-bwlimit <kbps>   内部 scp/rsync 传输限速，单位 Kbit/s；0 会被拒绝
+        \\  --transfer-manifest-max-entries <n>  递归数据/项目内容校验的最大条目数，默认 100000；源或目标截断都会失败
+        \\  --no-transfer-manifest-verify  显式关闭递归数据/项目内容校验；会降低迁移完整性保证
         \\  --include-module <list>  只执行逗号分隔模块中的动作
         \\  --exclude-module <list>  跳过逗号分隔模块中的动作
         \\  --include-action <prefix>  只执行匹配 action id 前缀的动作

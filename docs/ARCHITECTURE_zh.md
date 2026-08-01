@@ -141,15 +141,24 @@ hostlift/
 │   │   ├── apply_support.zig
 │   │   ├── handler.zig
 │   │   ├── handlers/
+│   │   │   ├── appdata.zig
 │   │   │   ├── command.zig
+│   │   │   ├── postgresql.zig
 │   │   │   ├── projects.zig
+│   │   │   ├── reinstall.zig
+│   │   │   ├── resources.zig
 │   │   │   ├── rollback.zig
 │   │   │   ├── services.zig
 │   │   │   └── transfer.zig
 │   │   ├── plan_registry.zig
 │   │   ├── registry.zig
-│   │   └── registry_tests.zig
+│   │   ├── registry_tests.zig
 │   │   └── scan_registry.zig
+│   ├── postgresql/
+│   │   └── artifacts.zig
+│   ├── reinstall/
+│   │   ├── artifacts.zig
+│   │   └── schema.zig
 │   ├── firewall/
 │   │   ├── backend.zig
 │   │   ├── recovery.zig
@@ -214,11 +223,16 @@ hostlift/
 │   ├── plan/
 │   │   ├── schema.zig
 │   │   ├── compatibility.zig
+│   │   ├── action_compatibility.zig
 │   │   ├── builder.zig
 │   │   ├── builder_tests.zig
 │   │   ├── filter.zig
 │   │   ├── filter_match.zig
 │   │   ├── hash.zig
+│   │   ├── postgresql_provider.zig
+│   │   ├── workload_schema.zig
+│   │   ├── workloads.zig
+│   │   ├── workloads_tests.zig
 │   │   ├── modules/
 │   │   │   ├── appdata.zig
 │   │   │   ├── acl_review.zig
@@ -250,6 +264,7 @@ hostlift/
 │   │   ├── defaults.zig
 │   │   ├── exec.zig
 │   │   ├── planner.zig
+│   │   ├── postgresql.zig
 │   │   ├── options.zig
 │   │   ├── operation_state.zig
 │   │   ├── package_manager.zig
@@ -317,7 +332,7 @@ hostlift/
 └── CODE_QUALITY_zh.md
 ```
 
-`src/security/validation.zig`、`src/credentials/source.zig`、`src/policy/*.zig`、`src/remote/*.zig`、`src/transport/*.zig`、`src/modules/*`、`src/rollback/*` 和 `src/audit/*` 已经形成第一轮清晰边界：安全层集中 host/path/argv/identity 校验，凭据层只描述 SSH identity 来源，策略层处理本地 allow/deny/risk/host/operator/ticket 约束，remote/transport 层是 SSH、scp、rsync、chunk 和远程 manifest 的唯一出口，module handler 负责 scan/plan/apply/verify/rollback 生命周期分发，rollback/audit 负责补偿记录和执行证据。项目未正式发布，后续边界冲突时直接重构调用点，不新增旧 API 兼容层；下一步重点是围绕个人服务器迁移补深度 verify、provider 级依赖、远程源 chunk/agent、字节块级 chunk 和剩余非文件副作用 rollback。
+`src/security/validation.zig`、`src/credentials/source.zig`、`src/policy/*.zig`、`src/remote/*.zig`、`src/transport/*.zig`、`src/modules/*`、`src/rollback/*` 和 `src/audit/*` 已经形成第一轮清晰边界：安全层集中 host/path/argv/identity 校验，凭据层只描述 SSH identity 来源，策略层处理本地 allow/deny/risk/host/operator/ticket 约束，remote/transport 层是 SSH、scp、rsync、chunk 和远程 manifest 的唯一出口，module handler 负责 scan/plan/apply/verify/rollback 生命周期分发，rollback/audit 负责补偿记录和执行证据。项目未正式发布，后续边界冲突时直接重构调用点，不新增旧 API 兼容层；下一步重点是围绕个人服务器迁移补元数据保真、有状态 provider/cutover、远程源 chunk/agent、字节块级 chunk 和剩余非文件副作用 rollback。
 
 ## 4. 核心工作流程
 
@@ -395,9 +410,41 @@ hostlift apply \
   --plan hostlift-plan.json \
   --source-host root@OLD \
   --host root@NEW \
+  --run-state ./hostlift-run.jsonl \
   --transfer-transport rsync \
   --approve
 ```
+
+approved apply 会先对全部未完成 action 做只读 preflight，再创建或恢复 `hostlift.apply.run_state.v1`。run state 是带 hash chain 的 JSONL，持有独占文件锁，头记录绑定 plan hash、目标 host、过滤后的 action 集合和 rollback manifest；action 记录保存 `started`、`rollback_prepared`、`succeeded`、`failed` 和恢复时的 `skipped`。`--resume-run` 只跳过有成功证据的 action，并复用首次 rollback 预备，任何绑定或链校验不一致都会在远程 mutation 前拒绝。
+
+PostgreSQL 是第一个专属有状态 provider。默认 plan 仍输出 `appdata_restore`；只有同时提供 `--postgresql-auto --postgresql-writers-stopped` 才生成固定 DAG：
+
+```text
+dump(source, quiesce)
+  -> target-baseline(target, quiesce)
+  -> transfer(source -> target)
+  -> restore(target)
+  -> catalog-verify(source == target)
+```
+
+五个 action 通过同一 `/var/lib/hostlift/artifacts/postgresql/<source-inventory-hash>` subject 绑定。validator 检查 ID、数量、phase、依赖、risk、subject 后缀与 plan 的 source inventory hash 完全一致，以及链内 subject 一致性；apply handler 再做相同 hash 绑定检查，并执行 root/peer auth、同 major、源端零其它 client backend、fresh target、容量和 artifact 冲突门禁。dump/restore 命令不能来自 inventory hint，固定 SQL 只能从 `remote/postgresql.zig` 的 enum 出去。
+
+可信 reinstall 是 resources 模块内的专属 provider。普通 plan 先由 `plan/modules/resources.zig` 生成 `script_reinstall`/`resource_reinstall` 人工合同；只有 `cli/plan.zig` 严格解析独立 `hostlift.reinstall_recipes.v1` 后，`plan/reinstall_provider.zig` 才会把精确 action 替换为固定三步 DAG：
+
+```text
+recipe JSON
+  -> reinstall/schema.zig
+  -> plan/reinstall_provider.zig
+  -> plan/validator.zig
+  -> modules/handlers/resources.zig
+  -> modules/handlers/reinstall.zig
+  -> remote/*
+  -> apply/backup.zig + rollback/*
+```
+
+artifact subject 由 `reinstall/artifacts.zig` 同时绑定 source inventory hash 和 recipe ID；plan 内三条 action 必须携带完全相同的 spec。apply 全批次 preflight 会实时核对 root、目标 distro/version/arch、命令入口和全部路径冲突。download 固定写 `0700`/`0600` artifact，并同时执行 curl 字节上限、精确大小和 SHA-256 校验；execute 只允许经过 schema 校验的 script/install argv；verify 再检查 artifact、声明路径和原始 stdout hash。rollback 只能删除 recipe 声明的新路径，安装脚本的未声明副作用不在自动恢复范围。
+
+文件型模块中，`copy_data_path`/`copy_project_path` 的 preflight 会通过 `manifest/local.zig` 或 `transport/manifest.zig` 构建完整源 manifest；`transport/remote_probe.zig` 批量执行远端 stat/hash，并读取符号链接目标。mutation 完成后，CLI 先写入新建路径 rollback baseline，再调用模块 verify 构建目标 manifest。截断、special file、缺项、额外项、类型/大小/hash/link target 不一致都会阻止 `succeeded` 状态。
 
 真正的离线 bundle、对象存储 staging 或常驻 agent 可以作为后续增强，但不属于当前个人迁移默认主线。
 
@@ -508,12 +555,24 @@ const Action = struct {
     module: ModuleName,
     action_type: ActionType,
     description: []const u8,
-    inputs: ActionInputs,
-    preconditions: []Precondition,
-    verify: []VerifyStep,
-    rollback: RollbackSpec,
     risk: RiskLevel,
     requires_confirmation: bool,
+    phase: ?ActionPhase,
+    depends_on: ?[]const []const u8,
+    manual_task: ?ManualTask,
+};
+
+const ManualTask = struct {
+    schema_version: []const u8, // hostlift.manual_task.v2
+    kind: ManualTaskKind,
+    provider: []const u8,
+    inputs: []ManualInput,
+    secret_refs: ?[]const []const u8,
+    preconditions: []ManualCondition,
+    expected_outputs: []ManualOutput,
+    verify_probes: []ManualProbe,
+    rollback_policy: ManualRollbackPolicy,
+    evidence_schema: []const u8,
 };
 
 const ActionType = enum {
@@ -546,19 +605,54 @@ const ActionType = enum {
 
 任何模块都不应直接从扫描结果执行 shell 命令。模块生成操作，执行器验证并运行它们。
 
-## 6. 兼容性规则
+当前 builder 输出 `hostlift.plan.v2`，同时保留 v1 读取兼容。`src/plan/dag.zig` 为可确定的生命周期补依赖边；validator 要求依赖已存在且出现在当前 action 之前，拒绝环和阶段逆序。plan/apply 过滤器只验证闭包，不自动扩大选择范围。manual task 已具备通用机器合同，`common.ManualTaskSpec` 允许 planner 追加深拷贝的 provider inputs 和 verify probe override；script/resource reinstall、appdata restore、systemd status 和 container status 已接入，secret 专属合同仍需扩展。
 
-### 6.1 发行版门控
+reinstall recipe 不是 manual evidence 的替代物：它在 plan 构建时把一条人工任务升级为可执行 action，因此 validator 必须证明原 manual action 已移除、每个 recipe 恰有 download/execute/verify 三条 action、链内 spec/subject 完全一致，并拒绝手写 plan 中重复 recipe、重复 manual action 或重叠 managed paths。scanner 中的 URL/checksum 字段只作为 AI 研究线索，不能直接进入执行路径。
 
-默认 v1 策略：
+`src/manual_evidence/schema.zig` 定义 `hostlift.manual_evidence.v1`，`src/manual_evidence/validator.zig` 负责把单份 evidence 绑定到原始 plan 字节 SHA-256、manual action、task kind 和 provider，并逐项校验 precondition、expected output 和 verify probe。`src/manual_evidence/completeness.zig` 再按 plan 中全部 manual action 聚合单文件校验摘要，生成 `hostlift.manual_evidence.completeness.v1`，失败关闭区分 missing、duplicate、invalid 和 unexpected evidence。CLI 的 `evidence validate/completeness` 只负责读取文件和输出报告；schema 不含 stdout、命令文本或 secret value 字段，解析时拒绝未知字段。
+
+完整度报告固定输出 `trust_level=contract_only`。这两个验证路径都不连接远程主机、不执行 probe、不验签、不写 apply run-state，也不改变 executor 对 `manual_step` 的原子拒绝；即使 `contract_complete=true`，仍不能把 workload 或业务健康状态改成 complete。
+
+`src/manual_evidence/ledger.zig` 提供 `hostlift.manual_evidence.ledger.v1` JSONL 持久层。`evidence record` 在任何 ledger 写入前从原始 evidence bytes 重新严格解析、运行 validator 并计算 SHA-256；文件打开后持有 exclusive lock，已有 ledger 必须通过全链、plan hash、ledger id、manual action、provider/task kind 和 action 唯一性校验，随后才追加摘要并立即 flush。新 ledger 使用 exclusive create，现有 ledger 不允许跨 plan 或为同一 action 追加第二份记录。
+
+`evidence verify-ledger` 使用 shared advisory lock 读取，避免与 record 的 exclusive lock 追加形成半记录；输出 `hostlift.manual_evidence.ledger.verify.v1`，按 plan 顺序列出已登记和缺失的 manual action。`valid` 只描述链与绑定，`ledger_contract_complete` 描述覆盖，`trust_level=hash_chain_only` 明确它没有外部签名、可信时间戳或不可变存储锚点。ledger 不保存 evidence 正文，也不接入 run-state/workload/apply。
+
+可信只读 probe 继续遵守原有分层，而不是从 evidence CLI 直接拼 SSH：
 
 ```text
-source.distro.id == target.distro.id
-source.distro.version_id == target.distro.version_id
-source.package_manager.kind == target.package_manager.kind
+cli/evidence.zig（子命令分发）
+  -> cli/evidence_probe.zig（probe/validate-probed 参数、文件读写和输出）
+  -> security/validation.zig（host 和 provider target）
+  -> remote/manual_probe.zig（固定只读 argv、SSH、丢弃原始输出）
+  -> manual_evidence/probe_schema.zig（hostlift.manual_probe_report.v1）
+  -> manual_evidence/probed_validator.zig（report 原始 SHA-256 + host + task/probe 绑定）
 ```
 
-如果此检查失败，HostLift 会在应用计划之前停止。它仍然可以生成仅报告的计划。
+首批 executor 支持 systemd、Docker/Podman container、TCP 和 HTTP；command/log/manual_evidence 失败关闭为 unsupported。自动 planner 当前为 systemd start/status review 和 container check 生成可执行 probe，其它 TCP/HTTP target 需要后续 scanner/provider 结构化提供。probe 是只读 SSH，不需要 apply `--approve`，但必须显式给出 host 和独占 output；它不写 apply run-state、workload 或 rollback，也不执行 manual action。报告未签名，`hostlift_remote_read_only` 只说明固定执行路径，不证明作者身份或阻止整份本地文件被重建。
+
+### 5.5 工作负载完成度报告
+
+`src/plan/workload_schema.zig` 定义 `hostlift.workload_report.v1`，`src/plan/workloads.zig` 只读聚合 source inventory、target inventory 和完整 migration plan。当前按 systemd 服务、项目/Compose、应用数据路径、Docker/Podman 容器和未托管资源建立工作负载；组件 action id 用于把模块动作重新关联到应用主体，无法可靠归属的 action 保留在 `unassigned_action_ids`，仍影响 `host_status`。
+
+状态顺序按失败关闭设计：非完整 scan、扫描 warning/truncated 或组件事实不足为 `unknown`；不满足 action 兼容要求、`compatibility_review`、其它 manual/critical action 为 `blocked`；可移植普通未决 action 为 `pending`；只有所有已建模组件匹配且无 action 才是 `complete`。全局 `compatibility.compatible=false` 本身不再阻断所有 workload。scanner 用可选 `scan.full_scan` 区分完整扫描、过滤扫描和缺少该元数据的旧 inventory；CLI 的 `plan --workloads` 禁止 action/module filter，避免裁掉未决动作后误报完整。
+
+这个报告仍是离线事实收敛视图，不是执行 ledger。迁移后需要重新扫描目标机；当前单文件 validator、plan 级 completeness 和 hash-chain evidence ledger 都尚未接入 workload。后续如果合并 run-state、manual evidence 和健康探针，应在 plan/workload 领域层增加显式 evidence 合并合同，不能让 CLI 直接猜测 JSONL 或绕过 audit/verify 边界。
+
+## 6. 兼容性规则
+
+### 6.1 完整主机兼容与 action 门控
+
+`compatibility.compatible` 只在发行版 ID、版本、已知包管理器和已知 CPU 架构四项全部相同时为 true。plan v2 不再把这个聚合值当作整份 plan 的开关：builder 先生成候选 action，再由 `src/plan/action_compatibility.zig` 按 action 类型和模块分类。
+
+```text
+portable                 project/appdata/home/user/authorized_keys/manual
+same_package_manager     package install
+same_distro_version      system config/cron/init/firewall
+same_arch                resources/container volume/Compose runtime
+full_host                repository/通用命令
+```
+
+不满足最低要求的候选动作会原位改写为 `compatibility_review` 结构化人工任务，保留原 action ID、类型、模块、要求和 mismatch。validator 对 v2 逐 action 复核，apply executor 在远程 preflight 前再次复核；旧 v1 仍要求完整主机兼容。
 
 ### 6.2 架构门控
 
@@ -567,7 +661,9 @@ source.package_manager.kind == target.package_manager.kind
 - 文本文件可以迁移。
 - 如果目标仓库为目标架构提供包，则包意图可以迁移。
 - Docker 镜像引用可以迁移，但拉取/应用需要目标架构可用。
-- `/opt`、`/usr/local/bin`、手动安装的二进制文件和编译语言工件默认为 `rebuild_required`。
+- `/opt` install root、未托管资源、容器 volume 和 Compose runtime action 不自动放行，其中资源复制会转为兼容性人工任务。
+
+当前门禁仍是粗粒度第一阶段：它没有证明 ELF interpreter、glibc/musl、SONAME、目标动态库、CPU feature 或镜像 manifest 可用。`same_arch=true` 不是二进制兼容证明。
 
 ### 6.3 云提供商门控
 
@@ -749,6 +845,12 @@ const DataManifestEntry = struct {
 ```
 
 大路径作为块传输。接收器在最终重命名前验证校验和。
+
+### 7.6.1 PostgreSQL Provider
+
+PostgreSQL provider 只支持 PostgreSQL 10+、源/目标同 major、root SSH、`postgres` OS 用户 peer 认证和无业务对象的 fresh target。它执行逻辑 dump，不复制 PGDATA。源端业务必须在 dump 前停写并保持维护窗口；运行时只读探针会拒绝除 HostLift 自身查询外仍有任何 client backend，但不声称能阻止之后的新连接。
+
+artifact 正文可能包含 role password hash，因此目录为 `0700`、文件为 `0600`，正文不会写进 JSON/JSONL。rollback manifest 只记录 target baseline 路径和 SHA-256；dispatcher 对 `postgresql_manual_recovery` 返回 `ManualRollbackRequired`。这条边界使恢复证据可审计，但不会把逻辑 dump 误报为事务级自动回滚。
 
 ### 7.7 Docker
 
@@ -1064,8 +1166,8 @@ hostlift-armv7-linux
 
 **理由：** 云提供商网络是锁定用户新服务器的最简单方法之一。HostLift 报告网络状态，但仅应用选定的安全项。
 
-### 14.5 数据库数据排除在 v1 自动迁移之外
+### 14.5 数据库默认人工，专属 Provider 显式开放
 
 **决策：** 已接受
 
-**理由：** 数据库数据目录需要通用文件复制无法提供的一致性保证。使用本机转储、复制、快照或用户定义的钩子。
+**理由：** 数据库数据目录仍不得走通用文件复制。MySQL/Redis 等默认继续使用本机转储、快照或人工 provider；PostgreSQL 只在双 opt-in、停写、同 major 和 fresh target 条件下开放固定逻辑迁移 DAG，并保留 manual recovery，而不是宣称通用自动迁移。

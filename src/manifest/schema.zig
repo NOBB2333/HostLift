@@ -39,6 +39,7 @@ pub const VerificationReport = struct {
     changed: usize,
     extra: usize,
     expected_truncated: bool,
+    actual_truncated: bool,
 };
 
 test "local manifest schema constant is stable" {

@@ -8,6 +8,7 @@ pub const ModuleHandler = handler.ModuleHandler;
 pub const ScanContext = handler.ScanContext;
 pub const PlanContext = handler.PlanContext;
 pub const ApplyContext = handler.ApplyContext;
+pub const ApplyPreflightContext = handler.ApplyPreflightContext;
 pub const ApplyOptions = handler.ApplyOptions;
 pub const ApplyRequirementsContext = handler.ApplyRequirementsContext;
 pub const ApplySupport = apply_support.ApplySupport;

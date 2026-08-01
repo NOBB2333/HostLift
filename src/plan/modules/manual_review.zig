@@ -119,11 +119,7 @@ test "manual review rules create high-risk actions without sensitive bodies" {
 
     var actions: std.ArrayList(plan.Action) = .empty;
     defer {
-        for (actions.items) |action| {
-            std.testing.allocator.free(action.id);
-            std.testing.allocator.free(action.subject);
-            std.testing.allocator.free(action.description);
-        }
+        for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
         actions.deinit(std.testing.allocator);
     }
 
@@ -142,6 +138,10 @@ test "manual review rules create high-risk actions without sensitive bodies" {
         try std.testing.expectEqual(plan.ActionType.manual_step, action.action_type);
         try std.testing.expect(action.requires_confirmation);
         try std.testing.expect(action.risk == .high or action.risk == .critical);
+        try std.testing.expect(action.manual_task != null);
+        try std.testing.expectEqualStrings(plan.manual_task_schema_version, action.manual_task.?.schema_version);
+        try std.testing.expect(action.manual_task.?.inputs.len > 0);
+        try std.testing.expect(action.manual_task.?.verify_probes.len > 0);
         try std.testing.expect(std.mem.indexOf(u8, action.description, "ALL=(") == null);
     }
 }

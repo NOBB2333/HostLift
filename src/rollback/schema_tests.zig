@@ -1,6 +1,28 @@
 const std = @import("std");
 const schema = @import("schema.zig");
 
+test "rollback schema accepts only hash-bound PostgreSQL manual recovery evidence" {
+    const root = "/var/lib/hostlift/artifacts/postgresql/abababababababababababababababababababababababababababababababab";
+    try schema.validateEntry(.{
+        .created_at = 1,
+        .host = "root@192.0.2.10",
+        .action_id = "appdata/postgresql-restore/cluster",
+        .action_type = "postgresql_manual_recovery",
+        .original_path = "",
+        .backup_path = root ++ "/target-baseline.sql",
+        .subject = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    try std.testing.expectError(error.InvalidRollbackManifestEntry, schema.validateEntry(.{
+        .created_at = 1,
+        .host = "root@192.0.2.10",
+        .action_id = "appdata/postgresql-restore/cluster",
+        .action_type = "postgresql_manual_recovery",
+        .original_path = "",
+        .backup_path = "/tmp/target-baseline.sql",
+        .subject = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    }));
+}
+
 test "rollback manifest accepts service enable rollback subject without paths" {
     const entry = schema.Entry{
         .created_at = 123,

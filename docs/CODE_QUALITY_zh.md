@@ -178,7 +178,7 @@ pub const ModuleHandler = struct {
 
 工具链 home 配置这次已经补齐第一批轻量路径：`~/.m2/settings.xml`、`~/.cargo/config.toml`、`~/.cargo/config`、`~/.gradle/gradle.properties` 和 `~/.config/go/env` 会进入 home/dev config 扫描。`~/.m2/repository`、`~/.cargo/registry`、`~/.gradle/caches`、Go module cache、pip cache 和 npm cache 仍不应默认迁移，应该由对应工具重建。
 
-curl 脚本或手工安装的应用已经通过 `resources` 进入通用资源地图：HostLift 会扫描 PATH、用户级 bin、运行中进程、systemd/user unit、XDG autostart、cron 和 profile/tool config 中引用的绝对可执行路径，并用 `dpkg -S`、`rpm -qf`、`pacman -Qo`、`apk info --who-owns` 判断是否由包管理器托管。常见 bin 目录直下的单文件 executable 默认进入审查，不会归并成整个父级 bin 目录；未托管 executable 会记录 `file` 类型和 `readelf`/`objdump` 静态动态依赖摘要，并生成通用 reinstall 人工步骤。仍未完成的是可信自动 reinstall provider：来源 URL、版本、安装脚本校验和、下载落盘审计和可回滚重装策略。
+curl 脚本或手工安装的应用已经通过 `resources` 进入通用资源地图：HostLift 会扫描 PATH、用户级 bin、运行中进程、systemd/user unit、XDG autostart、cron 和 profile/tool config 中引用的绝对可执行路径，并用 `dpkg -S`、`rpm -qf`、`pacman -Qo`、`apk info --who-owns` 判断是否由包管理器托管。常见 bin 目录直下的单文件 executable 默认进入审查，不会归并成整个父级 bin 目录；未托管 executable 会记录 `file` 类型和 `readelf`/`objdump` 静态动态依赖摘要，并生成通用 reinstall 人工步骤。显式 `hostlift.reinstall_recipes.v1` 已能把精确匹配项升级为 HTTPS/size/SHA-256/平台绑定的受控三步 DAG；仍未完成的是官方来源/签名自动判定、ABI/依赖验证和脚本未声明副作用的完整回滚。
 
 ## 分阶段重构建议
 

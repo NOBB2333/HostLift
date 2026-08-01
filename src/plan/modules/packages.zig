@@ -30,7 +30,7 @@ pub fn appendActions(
             .name = pkg,
             .module = .packages,
             .action_type = .manual_step,
-            .risk = .medium,
+            .risk = .high,
             .requires_confirmation = true,
             .description = "Review package hold or lock state",
         });

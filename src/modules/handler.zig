@@ -5,6 +5,8 @@ const remote_options = @import("../remote/options.zig");
 const remote_schema = @import("../remote/schema.zig");
 const rollback_manifest = @import("../rollback/manifest.zig");
 
+pub const default_transfer_manifest_max_entries: usize = 100_000;
+
 // 模块扫描上下文，持有 IO、分配器和模块清单指针。
 pub const ScanContext = struct {
     io: std.Io,
@@ -17,6 +19,18 @@ pub const PlanContext = struct {
     allocator: std.mem.Allocator,
     source: inventory.ModuleInventory,
     target: inventory.ModuleInventory,
+};
+
+// 模块 apply 前置检查上下文；只能执行只读探测，不得创建备份或修改源/目标主机。
+pub const ApplyPreflightContext = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    migration_plan: plan.MigrationPlan,
+    source_host: ?[]const u8,
+    target_host: []const u8,
+    options: ApplyOptions,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
 };
 
 // 模块执行上下文，包含迁移计划、主机信息和执行选项。
@@ -47,6 +61,8 @@ pub const ApplyOptions = struct {
     transfer_partial: bool = false,
     transfer_resume: bool = false,
     transfer_bandwidth_limit_kbps: ?u32 = null,
+    transfer_manifest_verify: bool = true,
+    transfer_manifest_max_entries: usize = default_transfer_manifest_max_entries,
 };
 
 // 验证阶段上下文，用于校验 apply 结果。
@@ -57,6 +73,8 @@ pub const VerifyContext = struct {
     source_host: ?[]const u8 = null,
     target_host: []const u8,
     execution: remote_options.ExecutionOptions = .{},
+    transfer_manifest_verify: bool = true,
+    transfer_manifest_max_entries: usize = default_transfer_manifest_max_entries,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 };
@@ -93,6 +111,7 @@ pub const ModuleHandler = struct {
     scan: ?*const fn (ctx: ScanContext) anyerror!void = null,
     planActions: ?*const fn (ctx: PlanContext, actions: *std.ArrayList(plan.Action)) anyerror!void = null,
     applyRequirements: ?*const fn (ctx: ApplyRequirementsContext, action: plan.Action) []const []const u8 = null,
+    preflight: ?*const fn (ctx: ApplyPreflightContext, action: plan.Action) anyerror!void = null,
     apply: ?*const fn (ctx: ApplyContext, action: plan.Action) anyerror!ApplyResult = null,
     verify: ?*const fn (ctx: VerifyContext, action: plan.Action) anyerror!VerifyResult = null,
     rollback: ?*const fn (ctx: RollbackContext, entry: rollback_manifest.Entry) anyerror!RollbackResult = null,

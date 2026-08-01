@@ -98,6 +98,16 @@ pub fn appendActions(
             .risk = .high,
             .description = "Check container recreation and post-migration status; prefer Compose or explicit run command review because HostLift does not live-migrate containers",
         });
+        const task_inputs = [_]@import("common.zig").ManualInputSpec{
+            .{ .name = "runtime", .value = @tagName(container.runtime) },
+            .{ .name = "container", .value = container.name },
+        };
+        const probe_target = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ @tagName(container.runtime), container.name });
+        defer allocator.free(probe_target);
+        const task_probes = [_]@import("common.zig").ManualProbeSpec{.{
+            .kind = .container,
+            .target = probe_target,
+        }};
         try manual_common.appendManualStep(allocator, actions, .{
             .id_prefix = "docker/check-container",
             .name = action_name,
@@ -105,6 +115,9 @@ pub fn appendActions(
             .module = .docker,
             .risk = .high,
             .description = "Verify container health, exposed ports and recent logs after migration",
+            .task_provider = "container_status",
+            .task_inputs = &task_inputs,
+            .task_verify_probes = &task_probes,
         });
     }
     if (source.truncated) {

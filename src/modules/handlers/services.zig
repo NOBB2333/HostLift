@@ -9,6 +9,7 @@ const file_rollback_handler = @import("rollback.zig");
 const file_transfer_handler = @import("transfer.zig");
 const remote_exec = @import("../../remote/exec.zig");
 const remote_planner = @import("../../remote/planner.zig");
+const remote_schema = @import("../../remote/schema.zig");
 const services_openrc = @import("services_openrc.zig");
 const services_sysv = @import("services_sysv.zig");
 const services_user_systemd = @import("services_user_systemd.zig");
@@ -26,28 +27,26 @@ pub fn applyRequirements(ctx: handler.ApplyRequirementsContext, action: plan.Act
     };
 }
 
+// 对 service 中的 unit/init 文件动作执行只读传输 preflight，其余动作由通用命令检查覆盖。
+pub fn preflight(ctx: handler.ApplyPreflightContext, action: plan.Action) !void {
+    if (action.action_type == .install_systemd_unit) {
+        const transfer = try systemdUnitTransfer(ctx, action);
+        defer ctx.allocator.free(transfer.target_path);
+        try file_transfer_handler.preflightTransferPlan(ctx, action, transfer.plan);
+        return;
+    }
+    if (action.action_type == .write_file or action.action_type == .copy_home_config) {
+        try file_transfer_handler.preflight(ctx, action);
+    }
+}
+
 // 执行 service 模块动作；unit 安装走传输加 daemon-reload，其余走命令型 handler。
 pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResult {
     if (action.action_type == .install_systemd_unit) {
-        const source_path = apply_actions.subject(action);
-        if (source_path.len == 0) return error.MissingApplySubject;
-        const target_path = try apply_actions.systemdTargetPath(ctx.allocator, action, source_path);
-        defer ctx.allocator.free(target_path);
-        const transfer_plan = try remote_planner.buildTransferPlanAdvancedWithLimits(
-            ctx.target_host,
-            ctx.source_host,
-            source_path,
-            target_path,
-            true,
-            false,
-            ctx.options.transfer_transport,
-            ctx.options.transfer_partial,
-            ctx.options.transfer_resume,
-            ctx.options.execution,
-            ctx.options.transfer_bandwidth_limit_kbps,
-        );
+        const transfer = try systemdUnitTransfer(ctx, action);
+        defer ctx.allocator.free(transfer.target_path);
         try ctx.stdout.print("  - {s}: ", .{action.id});
-        try transfer_command.executePlan(ctx.io, ctx.allocator, transfer_plan, ctx.stdout, ctx.stderr);
+        try transfer_command.executePlan(ctx.io, ctx.allocator, transfer.plan, ctx.stdout, ctx.stderr);
 
         var reload_argv = [_][]const u8{ "systemctl", "daemon-reload" };
         const reload_plan = try remote_planner.buildCommandPlanWithOptions(ctx.target_host, reload_argv[0..], ctx.options.execution);
@@ -70,6 +69,34 @@ pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResul
         return .{ .changed = true };
     }
     return command_handler.apply(ctx, action);
+}
+
+const SystemdUnitTransfer = struct {
+    target_path: []const u8,
+    plan: remote_schema.TransferPlan,
+};
+
+fn systemdUnitTransfer(ctx: anytype, action: plan.Action) !SystemdUnitTransfer {
+    const source_path = apply_actions.subject(action);
+    if (source_path.len == 0) return error.MissingApplySubject;
+    const target_path = try apply_actions.systemdTargetPath(ctx.allocator, action, source_path);
+    errdefer ctx.allocator.free(target_path);
+    return .{
+        .target_path = target_path,
+        .plan = try remote_planner.buildTransferPlanAdvancedWithLimits(
+            ctx.target_host,
+            ctx.source_host,
+            source_path,
+            target_path,
+            true,
+            false,
+            ctx.options.transfer_transport,
+            ctx.options.transfer_partial,
+            ctx.options.transfer_resume,
+            ctx.options.execution,
+            ctx.options.transfer_bandwidth_limit_kbps,
+        ),
+    };
 }
 
 // 验证 service 模块动作结果。

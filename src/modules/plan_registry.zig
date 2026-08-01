@@ -4,6 +4,7 @@ const plan = @import("../plan/schema.zig");
 const handler = @import("handler.zig");
 
 const appdata_rules = @import("../plan/modules/appdata.zig");
+const appdata_handler = @import("handlers/appdata.zig");
 const configs_rules = @import("../plan/modules/configs.zig");
 const command_handler = @import("handlers/command.zig");
 const container_review_rules = @import("../plan/modules/container_review.zig");
@@ -25,6 +26,7 @@ const storage_review_rules = @import("../plan/modules/storage_review.zig");
 const sudoers_review_rules = @import("../plan/modules/sudoers_review.zig");
 const system_baseline_review_rules = @import("../plan/modules/system_baseline_review.zig");
 const transfer_handler = @import("handlers/transfer.zig");
+const resources_handler = @import("handlers/resources.zig");
 const users_rules = @import("../plan/modules/users.zig");
 
 const ModuleHandler = handler.ModuleHandler;
@@ -32,17 +34,17 @@ const PlanContext = handler.PlanContext;
 
 const registered_handlers = [_]ModuleHandler{
     .{ .name = .packages, .planActions = planPackages, .applyRequirements = command_handler.applyRequirements, .apply = command_handler.apply, .verify = command_handler.verify, .rollback = command_handler.rollback },
-    .{ .name = .services, .planActions = planServices, .applyRequirements = service_handler.applyRequirements, .apply = service_handler.apply, .verify = service_handler.verify, .rollback = service_handler.rollback },
-    .{ .name = .cron, .planActions = planCron, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .services, .planActions = planServices, .applyRequirements = service_handler.applyRequirements, .preflight = service_handler.preflight, .apply = service_handler.apply, .verify = service_handler.verify, .rollback = service_handler.rollback },
+    .{ .name = .cron, .planActions = planCron, .applyRequirements = transfer_handler.applyRequirements, .preflight = transfer_handler.preflight, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
     .{ .name = .users, .planActions = planUsers, .applyRequirements = command_handler.applyRequirements, .apply = command_handler.apply, .verify = command_handler.verify, .rollback = command_handler.rollback },
-    .{ .name = .ssh, .planActions = planSsh, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
-    .{ .name = .configs, .planActions = planConfigs, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
-    .{ .name = .home_configs, .planActions = planHomeConfigs, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
-    .{ .name = .appdata, .planActions = planAppData, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
-    .{ .name = .projects, .planActions = planProjects, .applyRequirements = project_handler.applyRequirements, .apply = project_handler.apply, .verify = project_handler.verify, .rollback = project_handler.rollback },
-    .{ .name = .firewall, .planActions = planFirewall, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
-    .{ .name = .docker, .planActions = planContainerManualReview, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
-    .{ .name = .resources, .planActions = planResources, .applyRequirements = transfer_handler.applyRequirements, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .ssh, .planActions = planSsh, .applyRequirements = transfer_handler.applyRequirements, .preflight = transfer_handler.preflight, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .configs, .planActions = planConfigs, .applyRequirements = transfer_handler.applyRequirements, .preflight = transfer_handler.preflight, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .home_configs, .planActions = planHomeConfigs, .applyRequirements = transfer_handler.applyRequirements, .preflight = transfer_handler.preflight, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .appdata, .planActions = planAppData, .applyRequirements = appdata_handler.applyRequirements, .preflight = appdata_handler.preflight, .apply = appdata_handler.apply, .verify = appdata_handler.verify, .rollback = appdata_handler.rollback },
+    .{ .name = .projects, .planActions = planProjects, .applyRequirements = project_handler.applyRequirements, .preflight = project_handler.preflight, .apply = project_handler.apply, .verify = project_handler.verify, .rollback = project_handler.rollback },
+    .{ .name = .firewall, .planActions = planFirewall, .applyRequirements = transfer_handler.applyRequirements, .preflight = transfer_handler.preflight, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .docker, .planActions = planContainerManualReview, .applyRequirements = transfer_handler.applyRequirements, .preflight = transfer_handler.preflight, .apply = transfer_handler.apply, .verify = transfer_handler.verify, .rollback = rollback_handler.restoreFileBackup },
+    .{ .name = .resources, .planActions = planResources, .applyRequirements = resources_handler.applyRequirements, .preflight = resources_handler.preflight, .apply = resources_handler.apply, .verify = resources_handler.verify, .rollback = resources_handler.rollback },
     .{ .name = .network, .planActions = planNetworkManualReview },
     .{ .name = .sudoers, .planActions = planSudoersManualReview },
     .{ .name = .acl, .planActions = planAclManualReview },
@@ -173,4 +175,24 @@ fn planStorageManualReview(ctx: PlanContext, actions: *std.ArrayList(plan.Action
 // 生成系统基线模块的手动审核 action。
 fn planSystemBaselineManualReview(ctx: PlanContext, actions: *std.ArrayList(plan.Action)) !void {
     try system_baseline_review_rules.appendActions(ctx.allocator, actions, ctx.source.system_baseline, ctx.target.system_baseline);
+}
+
+test "transfer backed handlers register module preflight" {
+    const expected = [_]plan.ModuleName{
+        .services,
+        .cron,
+        .ssh,
+        .configs,
+        .home_configs,
+        .appdata,
+        .projects,
+        .firewall,
+        .docker,
+        .resources,
+    };
+
+    for (expected) |name| {
+        const module_handler = find(name) orelse return error.MissingRegisteredHandler;
+        try std.testing.expect(module_handler.preflight != null);
+    }
 }

@@ -6,6 +6,8 @@ const apply_actions = @import("../../apply/actions.zig");
 const apply_permissions = @import("../../apply/permissions.zig");
 const firewall_backend = @import("../../firewall/backend.zig");
 const firewall_reload = @import("../../firewall/reload.zig");
+const local_manifest = @import("../../manifest/local.zig");
+const manifest_verify = @import("../../manifest/verify.zig");
 const remote_exec = @import("../../remote/exec.zig");
 const remote_planner = @import("../../remote/planner.zig");
 const remote_preflight = @import("../../remote/preflight.zig");
@@ -19,38 +21,80 @@ pub fn applyRequirements(ctx: handler.ApplyRequirementsContext, action: plan.Act
     return switch (action.action_type) {
         .add_authorized_key => &.{ "chmod", "chown" },
         .copy_home_config => &.{ "mkdir", "chown", "chmod" },
+        .copy_data_path, .copy_project_path => if (ctx.options.transfer_manifest_verify)
+            &.{ "find", "stat", "sha256sum", "readlink" }
+        else
+            &.{},
         .apply_firewall_config => firewallRequirements(ctx, action),
         else => &.{},
     };
 }
 
+// 对文件型 action 执行只读 preflight，覆盖源路径、目标冲突、传输依赖和递归容量。
+pub fn preflight(ctx: handler.ApplyPreflightContext, action: plan.Action) !void {
+    const transfer_plan = try buildTransferPlan(ctx, action);
+    try preflightTransferPlan(ctx, action, transfer_plan);
+}
+
+// 对已构造的传输计划执行模块级只读 preflight；供 systemd unit 等改写目标路径的 action 复用。
+pub fn preflightTransferPlan(ctx: handler.ApplyPreflightContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan) !void {
+    try ensureSourcePathExists(ctx, transfer_plan);
+    try ensureNewDataTargetAbsent(ctx, action, transfer_plan);
+    try remote_preflight.runTransferPreflight(ctx.io, ctx.allocator, transfer_plan, ctx.options.execution);
+    try preflightCapacity(ctx, action, transfer_plan);
+    try preflightRecursiveManifest(ctx, action, transfer_plan);
+}
+
+fn preflightRecursiveManifest(ctx: handler.ApplyPreflightContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan) !void {
+    if (!shouldVerifyRecursiveManifest(action, ctx.options.transfer_manifest_verify)) return;
+    if (ctx.options.transfer_manifest_max_entries == 0) return error.InvalidManifestEntryLimit;
+
+    if (transfer_plan.source_host) |source_host| {
+        try remote_preflight.runCheck(ctx.io, ctx.allocator, .{
+            .host = source_host,
+            .commands = &.{ "find", "stat", "sha256sum", "readlink" },
+        }, ctx.options.execution);
+    }
+
+    var source_manifest = try buildSourceManifest(
+        ctx.io,
+        ctx.allocator,
+        transfer_plan.source_host,
+        transfer_plan.source_path,
+        ctx.options.transfer_manifest_max_entries,
+        ctx.options.execution,
+    );
+    defer source_manifest.deinit(ctx.allocator);
+    try manifest_verify.ensureCompleteContent(source_manifest);
+    try ctx.stdout.print("content manifest preflight {s}: entries={d} bytes={d}\n", .{
+        action.id,
+        source_manifest.entries.len,
+        source_manifest.total_bytes,
+    });
+}
+
+fn buildSourceManifest(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    source_host: ?[]const u8,
+    source_path: []const u8,
+    max_entries: usize,
+    execution: @import("../../remote/options.zig").ExecutionOptions,
+) !local_manifest.Manifest {
+    if (source_host) |host| {
+        return remote_manifest.buildRemoteWithOptions(io, allocator, host, source_path, max_entries, execution);
+    }
+    return local_manifest.build(io, allocator, source_path, max_entries);
+}
+
 // 执行文件型迁移动作，统一走 transfer plan、权限修复和可选防火墙 reload。
 pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResult {
+    const transfer_plan = try buildTransferPlan(ctx, action);
     const action_subject = apply_actions.subject(action);
-    if (action_subject.len == 0) return error.MissingApplySubject;
-    const recursive = action.action_type == .copy_data_path or
-        action.action_type == .copy_project_path or
-        action.action_type == .apply_firewall_config or
-        action.recursive;
-    const transfer_plan = try remote_planner.buildTransferPlanAdvancedWithLimits(
-        ctx.target_host,
-        ctx.source_host,
-        action_subject,
-        action_subject,
-        true,
-        recursive,
-        ctx.options.transfer_transport,
-        ctx.options.transfer_partial,
-        ctx.options.transfer_resume,
-        ctx.options.execution,
-        ctx.options.transfer_bandwidth_limit_kbps,
-    );
     try ctx.stdout.print("  - {s}: ", .{action.id});
     if (action.action_type == .copy_home_config) {
         try apply_permissions.prepareHomeConfigParentWithOptions(ctx.io, ctx.allocator, ctx.target_host, action, action_subject, ctx.stdout, ctx.stderr, ctx.options.execution);
     }
-    try preflightTransfer(ctx, transfer_plan);
-    try preflightCapacity(ctx, action, transfer_plan);
     try transfer_command.executePlan(ctx.io, ctx.allocator, transfer_plan, ctx.stdout, ctx.stderr);
     if (action.action_type == .add_authorized_key) {
         try apply_permissions.fixAuthorizedKeysWithOptions(ctx.io, ctx.allocator, ctx.target_host, action, action_subject, ctx.stdout, ctx.stderr, ctx.options.execution);
@@ -67,11 +111,45 @@ pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResul
     return .{ .changed = true };
 }
 
-fn preflightTransfer(ctx: handler.ApplyContext, transfer_plan: remote_schema.TransferPlan) !void {
-    try remote_preflight.runTransferPreflight(ctx.io, ctx.allocator, transfer_plan, ctx.options.execution);
+fn buildTransferPlan(ctx: anytype, action: plan.Action) !remote_schema.TransferPlan {
+    const action_subject = apply_actions.subject(action);
+    if (action_subject.len == 0) return error.MissingApplySubject;
+    const recursive = action.action_type == .copy_data_path or
+        action.action_type == .copy_project_path or
+        action.action_type == .apply_firewall_config or
+        action.recursive;
+    return remote_planner.buildTransferPlanAdvancedWithLimits(
+        ctx.target_host,
+        ctx.source_host,
+        action_subject,
+        action_subject,
+        true,
+        recursive,
+        ctx.options.transfer_transport,
+        ctx.options.transfer_partial,
+        ctx.options.transfer_resume,
+        ctx.options.execution,
+        ctx.options.transfer_bandwidth_limit_kbps,
+    );
 }
 
-fn preflightCapacity(ctx: handler.ApplyContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan) !void {
+fn ensureSourcePathExists(ctx: handler.ApplyPreflightContext, transfer_plan: remote_schema.TransferPlan) !void {
+    if (transfer_plan.source_host) |source_host| {
+        if (!try remote_exec.pathExistsWithOptions(ctx.io, ctx.allocator, source_host, transfer_plan.source_path, ctx.options.execution)) return error.TransferSourceMissing;
+        return;
+    }
+    std.Io.Dir.accessAbsolute(ctx.io, transfer_plan.source_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.TransferSourceMissing,
+        else => return err,
+    };
+}
+
+fn ensureNewDataTargetAbsent(ctx: handler.ApplyPreflightContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan) !void {
+    if (action.action_type != .copy_data_path and action.action_type != .copy_project_path) return;
+    if (try remote_exec.pathExistsWithOptions(ctx.io, ctx.allocator, ctx.target_host, transfer_plan.target_path, ctx.options.execution)) return error.TargetDataPathAlreadyExists;
+}
+
+fn preflightCapacity(ctx: handler.ApplyPreflightContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan) !void {
     if (!shouldCheckCapacity(action, transfer_plan)) return;
     const required_bytes = try sourceApparentBytes(ctx, transfer_plan);
     if (required_bytes == 0) return;
@@ -107,7 +185,7 @@ const SourceEntryCount = struct {
     overflow: bool = false,
 };
 
-fn remoteCapacity(ctx: handler.ApplyContext, path: []const u8) !RemoteCapacity {
+fn remoteCapacity(ctx: handler.ApplyPreflightContext, path: []const u8) !RemoteCapacity {
     var df_bytes_argv = [_][]const u8{ "df", "-PB1", path };
     const bytes_output = try remote_exec.commandOutputWithOptions(ctx.io, ctx.allocator, ctx.target_host, df_bytes_argv[0..], ctx.options.execution, 16 * 1024);
     defer ctx.allocator.free(bytes_output);
@@ -120,14 +198,14 @@ fn remoteCapacity(ctx: handler.ApplyContext, path: []const u8) !RemoteCapacity {
     };
 }
 
-fn sourceApparentBytes(ctx: handler.ApplyContext, transfer_plan: remote_schema.TransferPlan) !u64 {
+fn sourceApparentBytes(ctx: handler.ApplyPreflightContext, transfer_plan: remote_schema.TransferPlan) !u64 {
     if (transfer_plan.source_host) |source_host| {
         return remoteApparentBytes(ctx.io, ctx.allocator, source_host, transfer_plan.source_path, ctx.options.execution);
     }
     return localApparentBytes(ctx.io, ctx.allocator, transfer_plan.source_path);
 }
 
-fn sourceEntryCount(ctx: handler.ApplyContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan, available_inodes: u64) !SourceEntryCount {
+fn sourceEntryCount(ctx: handler.ApplyPreflightContext, action: plan.Action, transfer_plan: remote_schema.TransferPlan, available_inodes: u64) !SourceEntryCount {
     var result = SourceEntryCount{ .count = action.file_count };
     if (result.count >= available_inodes and result.count > 0) return result;
 
@@ -269,12 +347,55 @@ fn firewallRequirements(ctx: handler.ApplyRequirementsContext, action: plan.Acti
     };
 }
 
-// 验证文件型 action 的目标路径存在；单文件且有源主机时比对 SHA-256。
+// 验证文件型 action 的目标路径；递归数据/项目默认逐项比对内容，单文件在有源主机时比对 SHA-256。
 pub fn verify(ctx: handler.VerifyContext, action: plan.Action) !handler.VerifyResult {
     const action_subject = apply_actions.subject(action);
     if (action_subject.len == 0) return error.MissingApplySubject;
     const exists = try @import("../../remote/exec.zig").pathExistsWithOptions(ctx.io, ctx.allocator, ctx.target_host, action_subject, ctx.execution);
     if (!exists) return error.VerifyTargetMissing;
+    if (shouldVerifyRecursiveManifest(action, ctx.transfer_manifest_verify)) {
+        if (ctx.transfer_manifest_max_entries == 0) return error.InvalidManifestEntryLimit;
+        var source_manifest = try buildSourceManifest(
+            ctx.io,
+            ctx.allocator,
+            ctx.source_host,
+            action_subject,
+            ctx.transfer_manifest_max_entries,
+            ctx.execution,
+        );
+        defer source_manifest.deinit(ctx.allocator);
+        try manifest_verify.ensureCompleteContent(source_manifest);
+
+        var target_manifest = try remote_manifest.buildRemoteWithOptions(
+            ctx.io,
+            ctx.allocator,
+            ctx.target_host,
+            action_subject,
+            ctx.transfer_manifest_max_entries,
+            ctx.execution,
+        );
+        defer target_manifest.deinit(ctx.allocator);
+        try manifest_verify.ensureCompleteContent(target_manifest);
+
+        const report = try manifest_verify.verify(ctx.allocator, source_manifest, target_manifest);
+        if (!report.valid) {
+            try ctx.stderr.print("  verify {s}: manifest mismatch missing={d} changed={d} extra={d} source_truncated={} target_truncated={}\n", .{
+                action.id,
+                report.missing,
+                report.changed,
+                report.extra,
+                report.expected_truncated,
+                report.actual_truncated,
+            });
+            return error.VerifyManifestMismatch;
+        }
+        try ctx.stdout.print("  verify {s}: content manifest matched entries={d} bytes={d}\n", .{
+            action.id,
+            report.checked,
+            source_manifest.total_bytes,
+        });
+        return .{ .ok = true, .message = "content manifest matched" };
+    }
     if (shouldVerifyChecksum(action)) {
         if (ctx.source_host) |source_host| {
             const source_hash = try remote_manifest.sha256FileWithOptions(ctx.io, ctx.allocator, source_host, action_subject, ctx.execution);
@@ -286,6 +407,11 @@ pub fn verify(ctx: handler.VerifyContext, action: plan.Action) !handler.VerifyRe
     }
     try ctx.stdout.print("  verify {s}: target exists {s}\n", .{ action.id, action_subject });
     return .{ .ok = true };
+}
+
+fn shouldVerifyRecursiveManifest(action: plan.Action, enabled: bool) bool {
+    if (!enabled) return false;
+    return action.action_type == .copy_data_path or action.action_type == .copy_project_path;
 }
 
 // 判断文件型 action 是否应做 SHA-256 校验。
@@ -323,6 +449,36 @@ test "transfer verifier checksum eligibility is single-file only" {
         .requires_confirmation = true,
         .recursive = true,
     }));
+}
+
+test "recursive data and project copies default to content manifest verification" {
+    try std.testing.expect(shouldVerifyRecursiveManifest(.{
+        .id = "appdata/copy//srv/data",
+        .module = .appdata,
+        .action_type = .copy_data_path,
+        .subject = "/srv/data",
+        .description = "copy data",
+        .risk = .high,
+        .requires_confirmation = true,
+    }, true));
+    try std.testing.expect(shouldVerifyRecursiveManifest(.{
+        .id = "projects/copy//srv/app",
+        .module = .projects,
+        .action_type = .copy_project_path,
+        .subject = "/srv/app",
+        .description = "copy project",
+        .risk = .high,
+        .requires_confirmation = true,
+    }, true));
+    try std.testing.expect(!shouldVerifyRecursiveManifest(.{
+        .id = "appdata/copy//srv/data",
+        .module = .appdata,
+        .action_type = .copy_data_path,
+        .subject = "/srv/data",
+        .description = "copy data",
+        .risk = .high,
+        .requires_confirmation = true,
+    }, false));
 }
 
 test "transfer preflight parses du and df output" {

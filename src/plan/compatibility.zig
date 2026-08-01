@@ -4,11 +4,11 @@ const plan = @import("schema.zig");
 
 // 比较源/目标清单的发行版、版本、包管理器和架构兼容性。
 pub fn check(source: inventory.Inventory, target: inventory.Inventory) plan.CompatibilityResult {
-    const same_distro = std.mem.eql(u8, source.distro.id, target.distro.id);
-    const same_version = std.mem.eql(u8, source.distro.version_id, target.distro.version_id);
-    const same_package_manager = source.package_manager.kind == target.package_manager.kind;
-    const same_arch = source.host.arch == target.host.arch;
-    const compatible = same_distro and same_version and same_package_manager;
+    const same_distro = source.distro.id.len > 0 and std.mem.eql(u8, source.distro.id, target.distro.id);
+    const same_version = source.distro.version_id.len > 0 and std.mem.eql(u8, source.distro.version_id, target.distro.version_id);
+    const same_package_manager = source.package_manager.kind != .unknown and source.package_manager.kind == target.package_manager.kind;
+    const same_arch = source.host.arch != .unknown and source.host.arch == target.host.arch;
+    const compatible = same_distro and same_version and same_package_manager and same_arch;
 
     return .{
         .compatible = compatible,
@@ -16,17 +16,17 @@ pub fn check(source: inventory.Inventory, target: inventory.Inventory) plan.Comp
         .same_version = same_version,
         .same_package_manager = same_package_manager,
         .same_arch = same_arch,
-        .reason = if (compatible) "compatible" else "source and target must have the same distro, version, and package manager",
+        .reason = if (compatible) "compatible" else "full compatibility requires a known and matching distro, version, package manager, and CPU architecture",
     };
 }
 
-test "same distro version and package manager is compatible even across arch" {
+test "same distro version and package manager is not fully compatible across arch" {
     const source = fixture(.x86_64, .apt, "ubuntu", "24.04");
     const target = fixture(.aarch64, .apt, "ubuntu", "24.04");
 
     const result = check(source, target);
 
-    try std.testing.expect(result.compatible);
+    try std.testing.expect(!result.compatible);
     try std.testing.expect(!result.same_arch);
 }
 
@@ -38,6 +38,17 @@ test "different distro version is incompatible" {
 
     try std.testing.expect(!result.compatible);
     try std.testing.expect(!result.same_version);
+}
+
+test "unknown architecture and package manager fail closed" {
+    const source = fixture(.unknown, .unknown, "linux", "1");
+    const target = fixture(.unknown, .unknown, "linux", "1");
+
+    const result = check(source, target);
+
+    try std.testing.expect(!result.compatible);
+    try std.testing.expect(!result.same_arch);
+    try std.testing.expect(!result.same_package_manager);
 }
 
 // 构造测试用的 inventory fixture。

@@ -101,12 +101,7 @@ pub fn filterPlanActions(allocator: std.mem.Allocator, migration_plan: *plan.Mig
 
 // 释放单个 plan action 中由 builder 分配的字段。
 fn deinitAction(allocator: std.mem.Allocator, action: plan.Action) void {
-    allocator.free(action.id);
-    allocator.free(action.subject);
-    if (action.home) |home| allocator.free(home);
-    if (action.shell) |shell| allocator.free(shell);
-    if (action.owner) |owner| allocator.free(owner);
-    allocator.free(action.description);
+    plan.deinitAction(allocator, action);
 }
 
 test "action filter selects modules and action id prefixes" {

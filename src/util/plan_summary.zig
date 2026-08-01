@@ -12,6 +12,13 @@ pub fn writePlanValidationSummary(writer: anytype, value: plan_validator.Validat
         \\Actions: {d}
         \\Requires confirmation: {d}
         \\Critical actions: {d}
+        \\Manual contract errors: {d}
+        \\PostgreSQL contract errors: {d}
+        \\Reinstall contract errors: {d}
+        \\Dependency errors: {d}
+        \\Phase errors: {d}
+        \\Duplicate action IDs: {d}
+        \\Compatibility errors: {d}
         \\
     , .{
         value.valid,
@@ -20,6 +27,13 @@ pub fn writePlanValidationSummary(writer: anytype, value: plan_validator.Validat
         value.actions,
         value.requires_confirmation,
         value.critical_actions,
+        value.manual_contract_errors,
+        value.postgresql_contract_errors,
+        value.reinstall_contract_errors,
+        value.dependency_errors,
+        value.phase_errors,
+        value.duplicate_action_ids,
+        value.compatibility_errors,
     });
 }
 
@@ -28,7 +42,7 @@ pub fn writePlanSelection(writer: anytype, value: plan.MigrationPlan) !void {
     const risk_counts = countRisks(value.actions);
     try writer.print(
         \\HostLift migration selection checklist
-        \\Compatibility: {s}
+        \\Full host compatibility: {s}
         \\Actions: {d}
         \\Risk summary: low={d} medium={d} high={d} critical={d}
         \\
@@ -58,7 +72,7 @@ pub fn writePlanHealthReport(writer: anytype, value: plan.MigrationPlan) !void {
     const total = counts.services + counts.network + counts.containers + counts.compose + counts.firewall;
     try writer.print(
         \\HostLift post-migration health report
-        \\Compatibility: {s}
+        \\Full host compatibility: {s}
         \\Health checks: {d}
         \\  Services: {d}
         \\  Network listeners: {d}
@@ -96,7 +110,7 @@ pub fn writePlanSummary(writer: anytype, value: plan.MigrationPlan) !void {
     const counts = countActions(value.actions);
     try writer.print(
         \\HostLift migration plan summary
-        \\Compatibility: {s}
+        \\Full host compatibility: {s}
         \\Reason: {s}
         \\Actions: {d}
         \\  Packages: {d}
@@ -282,7 +296,7 @@ fn writeSelectionBatch(writer: anytype, actions: []const plan.Action, batch: Sel
         \\
         \\{s} ({d})
         \\Filter hint: {s}
-        \\[ ] ACTION_ID | MODULE | RISK | TYPE | SUBJECT
+        \\[ ] ACTION_ID | MODULE | RISK | TYPE | PHASE | DEPENDS_ON | SUBJECT
         \\
     , .{ selectionBatchTitle(batch), total, selectionBatchHint(batch) });
     for (actions) |action| {
@@ -337,13 +351,16 @@ fn selectionBatchHint(batch: SelectionBatch) []const u8 {
 
 // 输出一条可勾选 action。
 fn writeChecklistAction(writer: anytype, action: plan.Action) !void {
+    const dependencies = plan.dependencies(action);
     try writer.print(
-        "[ ] {s} | {s} | {s} | {s} | {s}\n",
+        "[ ] {s} | {s} | {s} | {s} | {s} | {s} | {s}\n",
         .{
             action.id,
             @tagName(action.module),
             @tagName(action.risk),
             @tagName(action.action_type),
+            if (action.phase) |phase| @tagName(phase) else "legacy",
+            if (dependencies.len > 0) dependencies[0] else "-",
             action.subject,
         },
     );

@@ -47,7 +47,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, w
 
         var actual = try local_manifest.build(io, allocator, root_path orelse return error.MissingManifestPath, max_entries);
         defer actual.deinit(allocator);
-        const report = local_manifest.verify(parsed.value, actual);
+        const report = try local_manifest.verify(allocator, parsed.value, actual);
         try local_manifest.writeVerificationSummary(writer, report);
         if (!report.valid) return error.ManifestVerificationFailed;
         return;

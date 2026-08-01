@@ -18,6 +18,11 @@ pub fn applyRequirements(ctx: handler.ApplyRequirementsContext, action: plan.Act
     };
 }
 
+// 对 project 文件动作执行只读 preflight；Compose 命令动作由通用依赖检查覆盖。
+pub fn preflight(ctx: handler.ApplyPreflightContext, action: plan.Action) !void {
+    if (action.action_type == .copy_project_path) try transfer_handler.preflight(ctx, action);
+}
+
 // 执行 project 模块动作；项目目录复制走传输，其余 Compose 动作走命令型 handler。
 pub fn apply(ctx: handler.ApplyContext, action: plan.Action) !handler.ApplyResult {
     return switch (action.action_type) {

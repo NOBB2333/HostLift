@@ -226,4 +226,5 @@ test "inventory json without dev_env uses empty default" {
     try std.testing.expectEqual(@as(usize, 0), parsed.value.modules.system_baseline.script_apps.len);
     try std.testing.expectEqual(PolicyStatus.unknown, parsed.value.modules.security_policy.selinux.status);
     try std.testing.expectEqual(PolicyStatus.unknown, parsed.value.modules.security_policy.apparmor.status);
+    try std.testing.expectEqual(@as(?bool, null), parsed.value.scan.full_scan);
 }

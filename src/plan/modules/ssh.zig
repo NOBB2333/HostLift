@@ -78,11 +78,7 @@ fn hasEquivalentHostKey(facts: []const inventory.SshHostKeyFact, needle: invento
 test "ssh plan reviews changed host key identity" {
     var actions: std.ArrayList(plan.Action) = .empty;
     defer {
-        for (actions.items) |action| {
-            std.testing.allocator.free(action.id);
-            std.testing.allocator.free(action.subject);
-            std.testing.allocator.free(action.description);
-        }
+        for (actions.items) |action| plan.deinitAction(std.testing.allocator, action);
         actions.deinit(std.testing.allocator);
     }
 
